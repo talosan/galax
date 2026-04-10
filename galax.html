@@ -930,7 +930,14 @@ function render(){
   }
 }
 
-function loop(){update();render();requestAnimationFrame(loop);}
+let _lastT=0;
+function loop(ts){
+  requestAnimationFrame(loop);
+  const dt=ts-_lastT;
+  if(dt<16.5)return; // cap a ~60fps
+  _lastT=ts-(dt%16.5); // compensar acumulación
+  update();render();
+}
 
 // ── Init ──────────────────────────────────────
 hiScore=parseInt(localStorage.getItem('galax_hi')||'0');
