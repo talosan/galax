@@ -252,6 +252,8 @@ var PDE={
     c2.save();
     c2.translate(this.spriteSize/2,this.spriteSize/2);
     c2.scale(eScale,eScale);
+    // Compensar tamaños de sprite por tipo (mismo ajuste que en drawEnemyAt)
+    if(typeof TYPE_VIS_SCALE!=='undefined'&&TYPE_VIS_SCALE[type])c2.scale(TYPE_VIS_SCALE[type],TYPE_VIS_SCALE[type]);
     switch(type){
       case 'drone':dDrone(false);break;
       case 'wasp':dWasp();break;
@@ -278,6 +280,8 @@ var PDE={
     c2.save();
     c2.translate(this.spriteSize/2,this.spriteSize/2);
     c2.scale(eScale,eScale);
+    // Compensar tamaños de sprite por tipo (mismo ajuste que en drawEnemyAt)
+    if(typeof TYPE_VIS_SCALE!=='undefined'&&TYPE_VIS_SCALE[type])c2.scale(TYPE_VIS_SCALE[type],TYPE_VIS_SCALE[type]);
     switch(type){
       case 'vortex':dVortex();break;
       case 'nexus':dNexus(false);break;
@@ -348,6 +352,212 @@ else if(type==='bh'){const g=mkG(.14);const o=mkO('sawtooth',260,g);o.frequency.
 else if(type==='pu'){[0,.07,.14,.22].forEach((d,i)=>{const g=a.createGain();g.connect(a.destination);const o=a.createOscillator();o.type='sine';o.frequency.setValueAtTime([440,550,660,880][i],now+d);g.gain.setValueAtTime(.1,now+d);g.gain.exponentialRampToValueAtTime(.0001,now+d+.11);o.connect(g);o.start(now+d);o.stop(now+d+.13);});}
 else if(type==='bonuslife'){try{[[0,330,.08],[.1,440,.08],[.2,550,.08],[.32,660,.1],[.46,880,.15],[.62,660,.07],[.72,880,.22]].forEach(([td,f,dur])=>{const o=a.createOscillator(),g=a.createGain();o.type='square';o.frequency.setValueAtTime(f,now+td);g.gain.setValueAtTime(.12,now+td);g.gain.exponentialRampToValueAtTime(.001,now+td+dur);o.connect(g);g.connect(a.destination);o.start(now+td);o.stop(now+td+dur+.02);});}catch(e){}}
 }catch(e){}}
+
+// ── Ambient drone + swoop (add-on, puramente aditivo) ────────────────────────
+// Drone de fondo con estética "avispa" (misteriosa) como base única en todos
+// los niveles, con variaciones muy sutiles por nivel. Volumen uniforme y bajo.
+// Además, "piuuuuu" estilo Namco Galaxian cuando cada nave entra en picado.
+// No modifica nada del código original.
+(function(){
+  let droneNodes=null; // {master:GainNode, sources:[OscillatorNode,...]}
+  let droneLevelIdx=-1;
+  let swoopSeen=new WeakSet();
+  // Cajas de reward ya soltadas durante el combate actual del boss (evita duplicados).
+  // Cada entrada representa un umbral de HP (.75, .50, .25) ya cruzado.
+  let bossPuCurrent=null; // referencia al objeto boss actual (para resetear al cambiar)
+  let bossPuDone=new Set();
+
+  // Base común: todos los niveles comparten la topología del preset WASP
+  // (dos sawtooth desafinados → bandpass resonante → master), con un vibrato
+  // rápido que da el carácter "avispa" y un LFO lento del filtro (misterio).
+  //
+  // Parámetros por nivel: [baseF, detune, lfoRate, lfoDepth, filtCut, filtQ, filtLfoRate, filtLfoDepth]
+  //   baseF        frecuencia fundamental (Hz)
+  //   detune       detune de la 2ª voz (cents)
+  //   lfoRate      velocidad vibrato (Hz) — el "zumbido"
+  //   lfoDepth     profundidad vibrato (Hz)
+  //   filtCut      centro bandpass (Hz)
+  //   filtQ        resonancia
+  //   filtLfoRate  velocidad barrido filtro (Hz)
+  //   filtLfoDepth profundidad barrido filtro (Hz)
+  const DRONE_PARAMS={
+    // 0 DRONE — vibrato más lento y contenido, filtro algo más grave
+    drone:    [62, -10, 4.2, 2.8, 340, 6, 0.18, 120],
+    // 1 WASP — el preset de referencia (sector 2, "avispa")
+    wasp:     [68, -14, 5.5, 3.5, 380, 6, 0.22, 140],
+    // 2 VORTEX — LFO del filtro más profundo, sensación espiral
+    vortex:   [66, -12, 5.0, 3.2, 400, 6, 0.16, 180],
+    // 3 PHANTOM — detune mayor, beating espectral
+    phantom:  [64, -18, 4.6, 3.0, 370, 7, 0.13, 150],
+    // 4 SPLIT — detune casi simétrico hacia arriba
+    split:    [70,  12, 5.2, 3.3, 390, 6, 0.20, 140],
+    // 5 KAMI — vibrato más rápido, más nervioso
+    kami:     [72, -14, 6.2, 3.8, 400, 6, 0.24, 150],
+    // 6 SHOOTER — filtro un poco más cerrado, timbre más cálido
+    shooter:  [60, -12, 5.0, 3.0, 350, 7, 0.19, 130],
+    // 7 NEXUS — filtro más abierto, carácter espacial
+    nexus:    [64, -10, 4.8, 3.0, 430, 5, 0.14, 160],
+    // 8 INFERNO — ligera tensión, vibrato rápido, Q alto
+    inferno:  [70, -16, 6.0, 3.6, 390, 7, 0.26, 150],
+    // 9 OBLIVION — más grave, más lento, profundo
+    oblivion: [52, -14, 4.0, 2.6, 330, 7, 0.12, 140],
+    // 10 BOSS — grave, vibrato lento, filtro amplio. MISMO volumen que el resto.
+    boss:     [56, -18, 4.4, 3.2, 360, 7, 0.15, 170]
+  };
+
+  function makeDrone(a,t0,lp,p){
+    const [baseF,detune,lfoRate,lfoDepth,filtCut,filtQ,filtLfoRate,filtLfoDepth]=p;
+    // Volumen idéntico en todos los niveles — sutil, de fondo real
+    const VOL=0.014;
+    const master=a.createGain();
+    master.gain.setValueAtTime(0,t0);
+    master.gain.linearRampToValueAtTime(VOL,t0+1.3);
+    master.connect(a.destination);
+    // Filtro bandpass (el que da el carácter misterioso de la avispa)
+    const filt=a.createBiquadFilter();filt.type='bandpass';filt.frequency.value=filtCut;filt.Q.value=filtQ;filt.connect(master);
+    const f=baseF+lp*1.3;
+    // Dos voces sawtooth desafinadas
+    const o1=a.createOscillator();o1.type='sawtooth';o1.frequency.value=f;o1.connect(filt);
+    const o2=a.createOscillator();o2.type='sawtooth';o2.frequency.value=f;o2.detune.value=detune;o2.connect(filt);
+    // Vibrato rápido sobre ambas voces (alma del sonido avispa)
+    const lfo=a.createOscillator();lfo.type='sine';lfo.frequency.value=lfoRate;
+    const lfoG=a.createGain();lfoG.gain.value=lfoDepth;
+    lfo.connect(lfoG);lfoG.connect(o1.frequency);lfoG.connect(o2.frequency);
+    // Barrido lento del filtro (misterio)
+    const fLfo=a.createOscillator();fLfo.type='sine';fLfo.frequency.value=filtLfoRate;
+    const fLfoG=a.createGain();fLfoG.gain.value=filtLfoDepth;
+    fLfo.connect(fLfoG);fLfoG.connect(filt.frequency);
+    const srcs=[o1,o2,lfo,fLfo];srcs.forEach(s=>s.start(t0));
+    return{master,sources:srcs};
+  }
+
+  // Mapeo de índice de nivel → clave de preset (sigue el orden de LEVELS[].nameKey)
+  const DRONE_MAP=['drone','wasp','vortex','phantom','split','kami','shooter','nexus','inferno','oblivion','boss'];
+
+  function startDrone(){
+    try{
+      const a=ac();
+      stopDrone();
+      const lv=(typeof levelIdx==='number')?levelIdx:0;
+      const lp=(typeof loopCount==='number')?loopCount:0;
+      // Detectar boss por flag isBoss (robusto ante cambios de orden)
+      let key=DRONE_MAP[lv]||'wasp';
+      try{if(typeof LEVELS!=='undefined'&&LEVELS[lv]&&LEVELS[lv].isBoss)key='boss';}catch(e){}
+      const params=DRONE_PARAMS[key]||DRONE_PARAMS.wasp;
+      const t0=a.currentTime;
+      droneNodes=makeDrone(a,t0,lp,params);
+      droneLevelIdx=lv;
+    }catch(e){}
+  }
+  function stopDrone(){
+    if(!droneNodes)return;
+    try{
+      const a=ac(),t=a.currentTime;
+      droneNodes.master.gain.cancelScheduledValues(t);
+      droneNodes.master.gain.setValueAtTime(droneNodes.master.gain.value,t);
+      droneNodes.master.gain.linearRampToValueAtTime(0,t+0.4);
+      const srcs=droneNodes.sources||[];
+      setTimeout(()=>{for(const s of srcs){try{s.stop();}catch(e){}}},600);
+    }catch(e){}
+    droneNodes=null;droneLevelIdx=-1;
+  }
+
+  // "Piuuuuu" estilo Galaxian: barrido rápido de agudo a grave, con cuerpo
+  function swoop(){
+    if(typeof isMuted!=='undefined'&&isMuted)return;
+    try{
+      const a=ac(),now=a.currentTime;
+      // Voz 1: sawtooth barrido 1800 -> 180 Hz
+      const g1=a.createGain();g1.gain.setValueAtTime(.0001,now);
+      g1.gain.exponentialRampToValueAtTime(.11,now+.015);
+      g1.gain.exponentialRampToValueAtTime(.0001,now+.55);
+      const o1=a.createOscillator();o1.type='sawtooth';
+      o1.frequency.setValueAtTime(1800,now);
+      o1.frequency.exponentialRampToValueAtTime(180,now+.5);
+      const f1=a.createBiquadFilter();f1.type='lowpass';f1.frequency.value=3200;f1.Q.value=2;
+      o1.connect(f1);f1.connect(g1);g1.connect(a.destination);
+      o1.start(now);o1.stop(now+.58);
+
+      // Voz 2: square una quinta por debajo para dar cuerpo
+      const g2=a.createGain();g2.gain.setValueAtTime(.0001,now);
+      g2.gain.exponentialRampToValueAtTime(.05,now+.02);
+      g2.gain.exponentialRampToValueAtTime(.0001,now+.5);
+      const o2=a.createOscillator();o2.type='square';
+      o2.frequency.setValueAtTime(1200,now);
+      o2.frequency.exponentialRampToValueAtTime(120,now+.48);
+      o2.connect(g2);g2.connect(a.destination);
+      o2.start(now);o2.stop(now+.52);
+    }catch(e){}
+  }
+
+  // Loop propio independiente del loop principal
+  function ambientTick(){
+    requestAnimationFrame(ambientTick);
+    try{
+      const playing=(typeof state!=='undefined'&&state==='playing');
+      const paused=(typeof isPaused!=='undefined'&&isPaused);
+      const muted=(typeof isMuted!=='undefined'&&isMuted);
+      const active=playing && !paused && !muted;
+
+      // Gestión del drone (arranque / parada / cambio de nivel)
+      if(active){
+        const lv=(typeof levelIdx==='number')?levelIdx:0;
+        if(!droneNodes) startDrone();
+        else if(lv!==droneLevelIdx) startDrone();
+      }else{
+        if(droneNodes) stopDrone();
+      }
+
+      // Detección de inicio de picado real (piuuuuu por nave)
+      if(active && typeof enemies!=='undefined' && Array.isArray(enemies)){
+        for(const e of enemies){
+          if(!e||!e.alive)continue;
+          if(e.diveActive && e.divePhase==='out' && (!e.diveDelay||e.diveDelay<=0)){
+            if(!swoopSeen.has(e)){swoopSeen.add(e);swoop();}
+          }else if(!e.diveActive && swoopSeen.has(e)){
+            swoopSeen.delete(e);
+          }
+        }
+      }
+
+      // Cajas de reward durante el combate del boss.
+      // En los niveles normales las cajas salen al matar enemigos (~3.5% por muerte),
+      // pero el boss es un solo enemigo y el combate es largo — se quedaba sin cajas.
+      // Soltamos 3 cajas fijas en umbrales de HP: 75%, 50% y 25% de vida restante.
+      // Usamos la función maybeSpawnPU... no, llamamos al push directo para garantizar
+      // el drop (maybeSpawnPU tiene aleatoriedad). Replicamos su lógica de tipo.
+      try{
+        const b=(typeof boss!=='undefined')?boss:null;
+        if(active && b && !b.entering && typeof bossDying!=='undefined' && !bossDying){
+          // Reset de estado si cambia el boss (reinicio de nivel, o nuevo combate)
+          if(bossPuCurrent!==b){bossPuCurrent=b;bossPuDone.clear();}
+          const hpRatio=b.hp/b.maxHp;
+          const thresholds=[.75,.50,.25];
+          for(const th of thresholds){
+            if(!bossPuDone.has(th) && hpRatio<=th){
+              bossPuDone.add(th);
+              // Elegir tipo con la misma distribución que maybeSpawnPU
+              const types=['tri','rapid','shield'],wts=[.4,.4,.2];
+              let r=Math.random(),tp='tri';
+              for(let i=0;i<types.length;i++){r-=wts[i];if(r<=0){tp=types[i];break;}}
+              // Pequeño offset para que no caiga siempre en el mismo sitio
+              const ox=(Math.random()-.5)*60;
+              const oy=(Math.random()-.5)*20;
+              if(typeof powerups!=='undefined'&&Array.isArray(powerups)){
+                powerups.push({x:b.x+ox,y:b.y+oy,type:tp,angle:0,dead:false});
+              }
+              break; // máximo una caja por tick aunque se crucen dos umbrales a la vez
+            }
+          }
+        }else if(!b){
+          // Limpieza cuando no hay boss (p. ej. entre niveles)
+          if(bossPuCurrent){bossPuCurrent=null;bossPuDone.clear();}
+        }
+      }catch(e){}
+    }catch(e){}
+  }
+  requestAnimationFrame(ambientTick);
+})();
 
 // ── Game state ────────────────────────────────────────────────────────────────
 let state='title',frame=0,score=0,hiScore=0,lives=3,levelIdx=0,loopCount=0,modalMode='title';
@@ -427,6 +637,10 @@ function drawEnemyAt(e){
   ctx.save();
   ctx.translate(e.x,e.y);
   if(spriteScale!==1)ctx.scale(spriteScale,spriteScale);
+  // Compensación de tamaños: cada sprite tiene un bounding box original distinto
+  // (kami=20x26, split=24x28, oblivion=56x56...). Aplicamos un factor por tipo
+  // para que todos se vean con un tamaño visual similar al del drone (nivel 1).
+  const _ts=TYPE_VIS_SCALE[e.type];if(_ts)ctx.scale(_ts,_ts);
   const fl=e.flickTimer>0?(e.flickTimer%2===0?.2:1):(e.alpha!=null?e.alpha:1);
   ctx.globalAlpha*=fl;
   // Si el enemigo es premium, activar la paleta correspondiente.
@@ -625,6 +839,11 @@ function initPlayer(){const py=H-clamp(H*.12,60,100);player={x:W/2,y:py,tx:W/2,t
 // ── Enemies ───────────────────────────────────────────────────────────────────
 let enemies=[],boss=null,fDir=1,fDropping=false,fDropLeft=0,fOffset=0,waveIdx=0,waveTotal=0,diveCD=0;
 const TYPE_MAP=['drone','wasp','vortex','phantom','split','kami','shooter','nexus','inferno','oblivion'];
+// Factores de escala visual por tipo para uniformar tamaños. El drone (48x28) es la
+// referencia. Bounding boxes medidos: kami=20x26 (61%), split=24x28 (68%),
+// wasp=40x24 (84%), phantom=32x36 (89%), inferno=36x33 (91%), shooter=40x33 (96%),
+// vortex=40x40 (105%), nexus=49x49 (129%), oblivion=56x56 (147%).
+const TYPE_VIS_SCALE={drone:1.00,wasp:1.18,vortex:0.96,phantom:1.12,split:1.35,kami:1.55,shooter:1.05,nexus:0.80,inferno:1.10,oblivion:0.72};
 // Filas con colores contrastados entre sí:
 // kami=amarillo, drone=azul+rojo, nexus=cian, phantom=púrpura, split=verde, shooter=azul marino
 const ROW_TYPES=['kami','drone','nexus','phantom','split','shooter'];
