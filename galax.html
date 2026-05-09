@@ -949,13 +949,12 @@ function showLevelModal(mode){
     if(score>hiScore){hiScore=score;localStorage.setItem('galaxar_hi',hiScore);el('m-hi').textContent=t('newRecord');}
     else if(hiScore>0)el('m-hi').textContent=t('record')+' '+hiScore.toLocaleString();
     if(loopCount>0){el('m-stars').style.display='flex';el('m-stars').innerHTML='';for(let i=0;i<loopCount;i++){const s=document.createElement('span');s.className='ls';s.textContent='★';el('m-stars').appendChild(s);}}
+    // Flujo correcto: primero preguntar al usuario. Si acepta -> rewarded.
+    // Si rechaza (retry/menu sin ver anuncio) -> intersticial normal.
     el('m-btn').innerHTML=t('retry');
     el('m-btn2-wrap').style.display='block';
     el('m-btn2').innerHTML=t('mainMenu');
-    el('m-btn2').onclick=goMenu;
-    // Interstitial en game over — exactamente igual que el original
-    try{window.GalaxBridge?.showInterstitial();}catch(e){}
-    // Rewarded — si disponible, botón principal cambia a "Ver anuncio"
+    el('m-btn2').onclick=function(){try{window.GalaxBridge?.showInterstitial();}catch(e){}goMenu();};
     canContinueWithAd=false;
     try{
       if(window.GalaxBridge?.isRewardedReady()){
@@ -964,10 +963,13 @@ function showLevelModal(mode){
         el('m-btn').onclick=watchAdToContinue;
         el('m-btn2-wrap').style.display='block';
         el('m-btn2').innerHTML=t('retry');
-        el('m-btn2').onclick=function(){hideModal();startGame();};
+        el('m-btn2').onclick=function(){try{window.GalaxBridge?.showInterstitial();}catch(e){}hideModal();startGame();};
         el('m-btn3-wrap').style.display='block';
         el('m-btn3').innerHTML=t('mainMenu');
-        el('m-btn3').onclick=goMenu;
+        el('m-btn3').onclick=function(){try{window.GalaxBridge?.showInterstitial();}catch(e){}goMenu();};
+      }else{
+        // Sin rewarded disponible: el botón principal "retry" también dispara intersticial
+        el('m-btn').onclick=function(){try{window.GalaxBridge?.showInterstitial();}catch(e){}hideModal();startGame();};
       }
     }catch(e){}
   }
@@ -983,7 +985,7 @@ function modalAction(){
       try{window.GalaxBridge?.showInterstitial();}catch(e){}
     }
   }
-  else if(modalMode==='gameover'){hideModal();startGame();}
+  else if(modalMode==='gameover'){try{window.GalaxBridge?.showInterstitial();}catch(e){}hideModal();startGame();}
 }
 // AdMob rewarded — igual que el original
 function watchAdToContinue(){
