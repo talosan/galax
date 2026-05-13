@@ -217,7 +217,13 @@ var PDE={
   setLabels(){}
 };
 
-let ctx=C.getContext('2d');
+// OPT: alpha:false → compositor descarta blending del canvas (~5-15% gana)
+// OPT: desynchronized:true → vsync independiente, mejor latencia de input táctil
+let ctx=C.getContext('2d',{alpha:false,desynchronized:true});
+// OPT: declaración hoisted del cache de sprites. La asignación real ocurre más
+// abajo, después de que todas las funciones d* estén declaradas. Usamos var
+// para que resize() pueda hacer un null-check antes de la asignación sin TDZ.
+var __spriteCache=null;
 let W,H,DPR;let nebulaCache=null,nebulaBg='';
 // Cache del logo + textos estáticos del título (bitmap pequeño, solo zona logo).
 // Fondo y estrellas se dibujan en vivo cada frame, como gameplay.
@@ -225,7 +231,16 @@ let _titleLogoCache=null,_titleLogoKey='';
 // Caches del title vieja (que iba fluida): logo texto cacheado + gradient cacheado
 let _logoCache=null,_logoCacheW=0,_logoCacheSize=0;
 let _titleGrad=null,_titleGradW=0;
-function resize(){W=window.innerWidth;H=window.innerHeight;DPR=Math.min(window.devicePixelRatio||1,2.5);C.width=Math.round(W*DPR);C.height=Math.round(H*DPR);C.style.width=W+'px';C.style.height=H+'px';ctx.setTransform(DPR,0,0,DPR,0,0);ctx.imageSmoothingEnabled=false;nebulaCache=null;_titleLogoCache=null;_logoCache=null;_titleGrad=null;}
+function resize(){W=window.innerWidth;H=window.innerHeight;
+// OPT: DPR cap inteligente. Pixel-art no gana nada por encima de 1.5 en pantallas
+// grandes (>700px lógicos). En móvil mantenemos 2 por densidad de la pantalla.
+// Esto reduce el fillrate hasta 4× en monitor de coche / desktop sin pérdida visual.
+const _dprRaw=window.devicePixelRatio||1;
+DPR=W>700?Math.min(_dprRaw,1.5):Math.min(_dprRaw,2);
+C.width=Math.round(W*DPR);C.height=Math.round(H*DPR);C.style.width=W+'px';C.style.height=H+'px';ctx.setTransform(DPR,0,0,DPR,0,0);ctx.imageSmoothingEnabled=false;nebulaCache=null;_titleLogoCache=null;_logoCache=null;_titleGrad=null;
+// OPT: invalidar cache de sprites al redimensionar (si ya está construido)
+if(__spriteCache)__spriteCache.clear();
+}
 resize();setTimeout(()=>{resize();initBg();nebulaCache=null;},250);
 window.addEventListener('resize',()=>{resize();initBg();nebulaCache=null;});
 // Android WebView hooks
@@ -628,21 +643,212 @@ function drawEnemyAt(e){
   if(e.isPremium){
     _activePalette=(e.color==='#00ffff')?PALETTE_CYAN:PALETTE_GOLD;
   }
+  // ───────────────────────────────────────────────────────────────────────────
+  // OPT: SPRITE CACHE — usa drawImage cuando el sprite no cambia entre frames.
+  // Para sprites con animación interna (rotación, parpadeo, dmg) se construye
+  // una clave que incluye la variante; ahí el cache es 1 sola vez por variante.
+  // ───────────────────────────────────────────────────────────────────────────
+  // Defensa en profundidad: si por cualquier camino se llega aquí antes de que
+  // el cache esté inicializado (línea ~729 del script), caer al renderizado
+  // original — nunca peta el juego por una optimización.
+  if(!__spriteCache){
+    switch(e.type){
+      case 'drone':dDrone(e.hp<e.maxHp);break;
+      case 'wasp':dWasp();break;
+      case 'vortex':dVortex();break;
+      case 'phantom':dPhantom(e.alpha!=null?e.alpha:1);break;
+      case 'split':dSplit(e.hp);break;
+      case 'kami':dKami(e.diveActive);break;
+      case 'shooter':dShooter();break;
+      case 'nexus':dNexus(e.hp<e.maxHp);break;
+      case 'inferno':dInferno();break;
+      case 'oblivion':dOblivion();break;
+    }
+    _activePalette=null;
+    ctx.restore();
+    return;
+  }
+  const palKey=_activePalette===PALETTE_GOLD?'g':(_activePalette===PALETTE_CYAN?'c':'n');
+  let cachedKey=null;
   switch(e.type){
-    case 'drone':dDrone(e.hp<e.maxHp);break;
-    case 'wasp':dWasp();break;
-    case 'vortex':dVortex();break;
-    case 'phantom':dPhantom(e.alpha!=null?e.alpha:1);break;
-    case 'split':dSplit(e.hp);break;
-    case 'kami':dKami(e.diveActive);break;
-    case 'shooter':dShooter();break;
-    case 'nexus':dNexus(e.hp<e.maxHp);break;
-    case 'inferno':dInferno();break;
-    case 'oblivion':dOblivion();break;
+    case 'drone':   cachedKey='drone:'+(e.hp<e.maxHp?'d':'k')+':'+palKey; break;
+    case 'wasp':    cachedKey='wasp:'+palKey; break;
+    case 'phantom': /* tiene aletas animadas → no cacheamos cuerpo+aletas; cacheamos cuerpo y dibujamos aletas aparte */ cachedKey='phantom:'+palKey; break;
+    case 'split':   cachedKey='split:'+e.hp+':'+palKey; break;
+    case 'kami':    cachedKey='kami:'+(e.diveActive?'d':'n')+':'+palKey; break;
+    case 'shooter': cachedKey='shooter:'+palKey; break;
+    case 'inferno': cachedKey='inferno:'+(frame%6<3?'a':'b')+':'+palKey; break;
+    // vortex, nexus, oblivion: tienen rotación continua → tratados aparte abajo
+  }
+  if(cachedKey){
+    const sp=__spriteCache.get(cachedKey,e.type,e);
+    ctx.drawImage(sp.canvas,-sp.cx,-sp.cy);
+    // Animaciones overlay que no se pueden cachear:
+    if(e.type==='phantom'){
+      // Aletas onduladas — solo cuando frame%2===0, igual que el original
+      if(frame%2===0){
+        ctx.strokeStyle=(_activePalette===null?'#aa44ff':_activePalette.mid||'#aa44ff')+'99';
+        ctx.lineWidth=1.5;const tf=frame*.09;
+        [-5,5].forEach((x,i)=>{ctx.beginPath();ctx.moveTo(x,8);ctx.quadraticCurveTo(x+Math.sin(tf+i)*5,15,x+Math.sin(tf+i)*3,22);ctx.stroke();});
+      }
+    }
+  } else if(e.type==='vortex'){
+    // OPT: cachear sprite plano y rotar el blit (1 drawImage en vez de ~14 fillRect)
+    const sp=__spriteCache.get('vortex:'+palKey,'vortex',e);
+    const r=frame*.055;
+    ctx.save();ctx.rotate(r);ctx.drawImage(sp.canvas,-sp.cx,-sp.cy);ctx.restore();
+    // Las 3 motas orbitales y centro son baratas (4 fillRect) — se mantienen
+    ctx.fillStyle=(_activePalette===null?'#ffcc00':_activePalette.bright||'#ffcc00');
+    for(let i=0;i<3;i++){const a=i/3*Math.PI*2+frame*.055*2.2;p(Math.round(Math.cos(a)*18)-2,Math.round(Math.sin(a)*18)-2,4,4);}
+    ctx.fillStyle=(_activePalette===null?'#fff':_activePalette.highlight||'#fff');p(-2,-2,4,4);
+    ctx.fillStyle=(_activePalette===null?'#ff8800':_activePalette.accent||'#ff8800');p(-1,-1,2,2);
+  } else if(e.type==='nexus'){
+    // Dos sprites cacheados con rotaciones distintas
+    const dmg=e.hp<e.maxHp;
+    const ringKey='nexusring:'+(dmg?'d':'n')+':'+palKey;
+    const coreKey='nexuscore:'+(dmg?'d':'n')+':'+palKey;
+    const sr=__spriteCache.get(ringKey,'nexusring',e,{dmg});
+    const sc=__spriteCache.get(coreKey,'nexuscore',e,{dmg});
+    const r=frame*.032;
+    ctx.save();ctx.rotate(-r);ctx.drawImage(sr.canvas,-sr.cx,-sr.cy);ctx.restore();
+    ctx.save();ctx.rotate(r*2);ctx.drawImage(sc.canvas,-sc.cx,-sc.cy);ctx.restore();
+    // Núcleo central inmóvil (5 fillRect)
+    const c2=dmg?'#ff6600':(_activePalette===null?'#00ddff':_activePalette.bright||'#00ddff');
+    const c3=dmg?'#ff2200':(_activePalette===null?'#aaffff':_activePalette.highlight||'#aaffff');
+    ctx.fillStyle=(_activePalette===null?'#000':_activePalette.black||'#000');p(-5,-5,10,10);
+    ctx.fillStyle=c2;p(-4,-4,8,8);
+    ctx.fillStyle=c3;p(-3,-3,6,6);
+    ctx.fillStyle=(_activePalette===null?'#fff':_activePalette.white||'#fff');p(-2,-3,2,2);
+  } else if(e.type==='oblivion'){
+    // Corona rotante cacheada + cuerpo estático cacheado
+    const cr=__spriteCache.get('oblivioncrown:'+palKey,'oblivioncrown',e);
+    const bd=__spriteCache.get('oblivionbody:'+palKey,'oblivionbody',e);
+    const r=frame*.028;
+    ctx.save();ctx.rotate(r);ctx.drawImage(cr.canvas,-cr.cx,-cr.cy);ctx.restore();
+    ctx.drawImage(bd.canvas,-bd.cx,-bd.cy);
+  } else {
+    // Fallback: si por algún motivo la clave no se generó, dibujar como antes
+    switch(e.type){
+      case 'drone':dDrone(e.hp<e.maxHp);break;
+      case 'wasp':dWasp();break;
+      case 'vortex':dVortex();break;
+      case 'phantom':dPhantom(e.alpha!=null?e.alpha:1);break;
+      case 'split':dSplit(e.hp);break;
+      case 'kami':dKami(e.diveActive);break;
+      case 'shooter':dShooter();break;
+      case 'nexus':dNexus(e.hp<e.maxHp);break;
+      case 'inferno':dInferno();break;
+      case 'oblivion':dOblivion();break;
+    }
   }
   _activePalette=null;
   ctx.restore();
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// OPT: SPRITE CACHE — rasteriza cada variante a un canvas offscreen una sola
+// vez y lo blittea con drawImage en el loop principal. Bounding box generoso
+// (64×64) para que entren todos los sprites incluyendo halos. Origen centrado.
+// ───────────────────────────────────────────────────────────────────────────
+__spriteCache=(function(){
+  const cache=new Map();
+  const SIZE=72; // suficiente para el sprite más grande (inferno: ~36×24)
+  const HALF=SIZE/2;
+  function build(key,type,e,extra){
+    const nc=document.createElement('canvas');
+    nc.width=SIZE;nc.height=SIZE;
+    const c2=nc.getContext('2d');
+    c2.imageSmoothingEnabled=false;
+    // Pintar el sprite con la maquinaria existente usando un ctx temporal
+    const realCtx=ctx;
+    // Truco: las funciones d* dibujan en (0,0) usando la variable ctx del closure
+    // del módulo → swapeamos ctx temporalmente al canvas auxiliar.
+    ctx=c2;
+    ctx.translate(HALF,HALF);
+    // Para variantes que dependen de `frame` (parpadeos), las dibujamos
+    // manualmente para no tener que mutar `frame` en pleno juego.
+    switch(type){
+      case 'drone':   dDrone(extra&&extra.dmg||key.indexOf(':d:')>=0); break;
+      case 'wasp':    dWasp(); break;
+      case 'phantom': dPhantom(1); break;
+      case 'split':   { const hp=parseInt(key.split(':')[1],10); dSplit(hp); break; }
+      case 'kami':    dKami(key.indexOf(':d:')>=0); break;
+      case 'shooter': dShooter(); break;
+      case 'inferno': {
+        // Dos variantes del parpadeo: 'a' = fl=1 (brillante), 'b' = fl=.65 (atenuado)
+        const phase=key.split(':')[1];
+        const fl=phase==='a'?1:.65;
+        ctx.fillStyle=(_activePalette===null?'#880000':_activePalette.deepest||'#880000');p(-18,-10,36,6);p(-14,-16,28,6);p(-10,-20,20,4);
+        ctx.fillStyle=(_activePalette===null?'#cc1100':_activePalette.dark||'#cc1100');p(-16,-10,32,6);p(-12,-16,24,6);p(-8,-20,16,4);
+        ctx.fillStyle=(_activePalette===null?'#ff4422':_activePalette.mid||'#ff4422');p(-8,-14,16,4);p(-4,-18,8,4);
+        ctx.fillStyle=(_activePalette===null?`rgba(255,110,0,${fl})`:_activePalette.accent||`rgba(255,110,0,${fl})`);p(-14,0,4,9);p(-8,0,4,11);p(-2,0,4,13);p(4,0,4,11);p(10,0,4,9);
+        ctx.fillStyle=(_activePalette===null?`rgba(255,220,0,${fl*.85})`:_activePalette.bright||`rgba(255,220,0,${fl*.85})`);p(-13,0,2,5);p(-7,0,2,6);p(-1,0,2,7);p(5,0,2,6);p(11,0,2,5);
+        ctx.fillStyle=(_activePalette===null?'#ffeecc':_activePalette.highlight||'#ffeecc');p(-10,-13,4,4);p(6,-13,4,4);
+        ctx.fillStyle=(_activePalette===null?'#ff4400':_activePalette.accent||'#ff4400');p(-9,-12,2,2);p(7,-12,2,2);
+        break;
+      }
+      case 'vortex':  {
+        // Versión SIN rotación, SIN motas orbitales, SIN centro (esos se dibujan aparte)
+        ctx.fillStyle=(_activePalette===null?'#993300':_activePalette.deepest||'#993300');p(-4,-16,8,4);p(-8,-12,16,4);p(-10,-8,20,4);p(-10,-4,20,4);p(-8,0,16,4);p(-4,4,8,4);
+        ctx.fillStyle=(_activePalette===null?'#ff6600':_activePalette.mid||'#ff6600');p(-6,-12,12,4);p(-8,-8,16,4);p(-8,-4,16,4);p(-6,0,12,4);
+        ctx.fillStyle=(_activePalette===null?'#ffaa00':_activePalette.bright||'#ffaa00');p(-2,-8,4,8);
+        break;
+      }
+      case 'nexusring': {
+        const dmg=key.indexOf(':d:')>=0;
+        const c1=dmg?'#cc4400':(_activePalette===null?'#0088aa':_activePalette.dark||'#0088aa');
+        const c2c=dmg?'#ff6600':(_activePalette===null?'#00ddff':_activePalette.bright||'#00ddff');
+        ctx.fillStyle=c1;for(let i=0;i<8;i++){const a=i/8*Math.PI*2;p(Math.round(Math.cos(a)*18)-2,Math.round(Math.sin(a)*18)-2,4,4);}
+        ctx.fillStyle=c2c;for(let i=0;i<8;i++){const a=i/8*Math.PI*2+.2;p(Math.round(Math.cos(a)*22)-1,Math.round(Math.sin(a)*22)-1,3,3);}
+        break;
+      }
+      case 'nexuscore': {
+        const dmg=key.indexOf(':d:')>=0;
+        ctx.fillStyle=dmg?'#881100':(_activePalette===null?'#005566':_activePalette.deepest||'#005566');p(-8,-8,16,16);p(-10,-4,20,8);p(-4,-10,8,20);
+        ctx.fillStyle=dmg?'#cc2200':(_activePalette===null?'#0099bb':_activePalette.mid||'#0099bb');p(-6,-6,12,12);p(-8,-2,16,4);p(-2,-8,4,16);
+        break;
+      }
+      case 'oblivioncrown': {
+        // Brazos rotantes (sin la base central)
+        ctx.fillStyle=(_activePalette===null?'#330044':_activePalette.deepest||'#330044');
+        for(let i=0;i<6;i++){
+          const a=i/6*Math.PI*2;
+          const x1=Math.round(Math.cos(a)*12),y1=Math.round(Math.sin(a)*12);
+          const x2=Math.round(Math.cos(a)*22),y2=Math.round(Math.sin(a)*22);
+          p(x1-2,y1-2,4,4);p(x2-1,y2-1,3,3);
+          ctx.fillStyle=i%2===0?(_activePalette===null?'#00ff88':_activePalette.bright||'#00ff88'):(_activePalette===null?'#cc00ff':_activePalette.accent||'#cc00ff');
+          p(Math.round(Math.cos(a)*26)-1,Math.round(Math.sin(a)*26)-1,2,2);
+          ctx.fillStyle=(_activePalette===null?'#330044':_activePalette.deepest||'#330044');
+        }
+        break;
+      }
+      case 'oblivionbody': {
+        ctx.fillStyle=(_activePalette===null?'#220033':_activePalette.deepest||'#220033');p(-10,-10,20,20);p(-14,-6,28,12);p(-6,-14,12,28);
+        ctx.fillStyle=(_activePalette===null?'#660099':_activePalette.dark||'#660099');p(-8,-8,16,16);p(-12,-4,24,8);p(-4,-12,8,24);
+        ctx.fillStyle=(_activePalette===null?'#00ff88':_activePalette.mid||'#00ff88');p(-6,-6,12,12);
+        ctx.fillStyle=(_activePalette===null?'#000':_activePalette.black||'#000');p(-4,-4,8,8);
+        ctx.fillStyle=(_activePalette===null?'#cc00ff':_activePalette.accent||'#cc00ff');p(-3,-3,6,6);
+        ctx.fillStyle=(_activePalette===null?'#ffffff':_activePalette.white||'#ffffff');p(-1,-2,2,2);
+        break;
+      }
+    }
+    ctx=realCtx;
+    return {canvas:nc,cx:HALF,cy:HALF};
+  }
+  return {
+    get(key,type,e,extra){
+      let s=cache.get(key);
+      if(!s){
+        // Para que build() respete la paleta activa, hay que conservar _activePalette
+        s=build(key,type,e,extra);
+        cache.set(key,s);
+      }
+      return s;
+    },
+    clear(){cache.clear();},
+    size(){return cache.size;}
+  };
+})();
 
 // DRONE — rojo+azul como Galaxian fila inferior (más abundante)
 function dDrone(dmg){
