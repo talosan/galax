@@ -10,7 +10,7 @@
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#000;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none;font-family:'Press Start 2P',monospace}
-canvas{display:block;position:fixed;top:0;left:0;contain:strict;will-change:transform}
+canvas{display:block;position:fixed;top:0;left:0}
 #modal{position:fixed;inset:0;background:rgba(0,3,16,.92);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;z-index:100}
 #modal.hide{display:none}
 .mbox{border:1px solid rgba(0,229,255,.18);background:linear-gradient(160deg,rgba(0,10,30,.97),rgba(0,3,18,.99));border-radius:16px;padding:clamp(18px,3vw,40px) clamp(20px,4vw,48px);text-align:center;max-width:460px;width:92%;box-shadow:0 0 80px rgba(0,180,255,.08)}
@@ -58,8 +58,6 @@ body.aaos .m-btn{font-size:14px;padding:20px 44px;min-height:72px;letter-spacing
 body.aaos .m-btn2{font-size:12px;padding:16px 32px;min-height:64px}
 body.aaos #pause-overlay .p-btn{font-size:14px;padding:22px 48px;min-width:280px;min-height:72px}
 body.aaos #pause-overlay{gap:36px}
-/* Desfile DOM — compositor GPU separado del canvas principal */
-/* Parade del menú principal: ahora dibujado en canvas, sin DOM */
 </style>
 </head>
 <body>
@@ -80,7 +78,6 @@ body.aaos #pause-overlay{gap:36px}
   <div class="ao-sub" id="ao-sub">Por seguridad, el juego solo puede usarse con el vehículo detenido.</div>
 </div>
 <div id="ann"><div class="ann-sub" id="ann-sub">SECTOR 1</div><div class="ann-name" id="ann-name">FORMACION</div></div>
-<!-- Desfile del menú: ahora dibujado directamente en el canvas principal -->
 <div id="boss-wrap"><div class="boss-lbl" id="boss-lbl">&#9888; OVERLORD</div><div class="boss-track"><div id="boss-fill" style="width:100%"></div></div></div>
 <div id="modal">
   <div class="mbox">
@@ -202,76 +199,16 @@ document.getElementById('p-menu').innerHTML=t('menuBtn');
 document.getElementById('boss-lbl').innerHTML=t('overlord');
 
 // ── Canvas setup ──────────────────────────────────────────────────────────────
-const C=document.getElementById('c');
-// PDE eliminado: el desfile del menú ahora se dibuja directamente en el canvas
-// principal desde drawParade(), sin segundo requestAnimationFrame, sin DOM.
-// Stub para compatibilidad con llamadas residuales (show/hide/init son no-op).
-var PDE={
-  el:null, spriteSize:0,
-  init(){},
-  show(){},
-  hide(){},
-  resize(){},
-  setPos(){},
-  paintSprite(){},
-  setLabels(){}
-};
-
-// OPT: alpha:false → compositor descarta blending del canvas (~5-15% gana)
-// OPT: desynchronized:true → vsync independiente, mejor latencia de input táctil
-let ctx=C.getContext('2d',{alpha:false,desynchronized:true});
-// OPT: declaración hoisted del cache de sprites. La asignación real ocurre más
-// abajo, después de que todas las funciones d* estén declaradas. Usamos var
-// para que resize() pueda hacer un null-check antes de la asignación sin TDZ.
-var __spriteCache=null;
+const C=document.getElementById('c'),ctx=C.getContext('2d');
 let W,H,DPR;let nebulaCache=null,nebulaBg='';
-// Cache del logo + textos estáticos del título (bitmap pequeño, solo zona logo).
-// Fondo y estrellas se dibujan en vivo cada frame, como gameplay.
-let _titleLogoCache=null,_titleLogoKey='';
-// Caches del title vieja (que iba fluida): logo texto cacheado + gradient cacheado
 let _logoCache=null,_logoCacheW=0,_logoCacheSize=0;
 let _titleGrad=null,_titleGradW=0;
-function resize(){W=window.innerWidth;H=window.innerHeight;
-// OPT: DPR cap inteligente. Pixel-art no gana nada por encima de 1.5 en pantallas
-// grandes (>700px lógicos). En móvil mantenemos 2 por densidad de la pantalla.
-// Esto reduce el fillrate hasta 4× en monitor de coche / desktop sin pérdida visual.
-const _dprRaw=window.devicePixelRatio||1;
-DPR=W>700?Math.min(_dprRaw,1.5):Math.min(_dprRaw,2);
-C.width=Math.round(W*DPR);C.height=Math.round(H*DPR);C.style.width=W+'px';C.style.height=H+'px';ctx.setTransform(DPR,0,0,DPR,0,0);ctx.imageSmoothingEnabled=false;nebulaCache=null;_titleLogoCache=null;_logoCache=null;_titleGrad=null;
-// OPT: invalidar cache de sprites al redimensionar (si ya está construido)
-if(__spriteCache)__spriteCache.clear();
-}
+function resize(){W=window.innerWidth;H=window.innerHeight;DPR=Math.min(window.devicePixelRatio||1,2.5);C.width=Math.round(W*DPR);C.height=Math.round(H*DPR);C.style.width=W+'px';C.style.height=H+'px';ctx.setTransform(DPR,0,0,DPR,0,0);ctx.imageSmoothingEnabled=false;nebulaCache=null;_logoCache=null;}
 resize();setTimeout(()=>{resize();initBg();nebulaCache=null;},250);
 window.addEventListener('resize',()=>{resize();initBg();nebulaCache=null;});
 // Android WebView hooks
 window.onResumeGame=function(){setTimeout(()=>{resize();initBg();nebulaCache=null;},100);};
 window.canReload=function(){return state==='title';};
-
-// ── Performance: boot mode y recovery post-ad ─────────────────────────────────
-// Durante los primeros 2 segundos tras cargar, el motor JIT de Chromium aún
-// no ha optimizado funciones hot, y la GPU está calentándose. Reducimos
-// temporalmente la carga visual para que el primer impacto al usuario sea
-// fluido. Después de 2s, todo vuelve a normalidad con JIT caliente.
-let __bootMode=true;
-let __adRecoveryFrames=0;
-setTimeout(()=>{__bootMode=false;},2000);
-
-// Llamado por Kotlin cuando se cierra un anuncio fullscreen. Entramos en
-// modo recovery durante 30 frames (~500ms a 60fps) para dar tiempo a que el
-// pipeline GPU recupere texturas y prioridad.
-window.onAdClosed=function(){
-  __adRecoveryFrames=30;
-  // Forzar reconstrucción del cache de nebula al volver del ad (la GPU
-  // ha perdido la textura).
-  if(typeof nebulaCache!=='undefined')nebulaCache=null;
-};
-
-// Helper consultable desde el resto del código del juego para saber si
-// debemos reducir efectos. Es ligero y no genera overhead.
-window.__shouldReduceFx=function(){
-  if(__adRecoveryFrames>0){__adRecoveryFrames--;return true;}
-  return __bootMode;
-};
 
 // ── Automotive (AAOS) integration ─────────────────────────────────────────────
 // Detecta si la app corre en Android Automotive OS consultando al bridge nativo.
@@ -305,17 +242,49 @@ window.onDrivingStateChanged=function(driving){
   if(driving){
     // Pausar partida si está en curso
     try{if(state==='playing'&&!isPaused&&typeof togglePause==='function')togglePause();}catch(e){}
-    // Cortar audio inmediatamente (DD-3): silenciar drone ambiente
+    // Cortar audio inmediatamente (DD-3): silenciar drone ambiente y suspender
+    // el AudioContext entero (garantía total de silencio incluso si algún
+    // sonido se programó con anticipación).
     try{isMuted=true;const mb=document.getElementById('btn-mute');if(mb)mb.textContent='🔇';}catch(e){}
+    try{if(typeof window.suspendAudio==='function')window.suspendAudio();}catch(e){}
     _showAaosOverlay();
   }else{
     _hideAaosOverlay();
     // El audio queda muted hasta que el usuario lo reactive manualmente.
     // No tocamos isMuted aquí — el usuario decide.
+    // Pero sí reanudamos el AudioContext para que los efectos puedan sonar
+    // si el usuario desmutea desde el botón.
+    try{if(typeof window.resumeAudio==='function')window.resumeAudio();}catch(e){}
   }
 };
 // Alias mantenido por compatibilidad con builds anteriores que llamen al hook viejo.
 window.onDrivingStarted=function(){window.onDrivingStateChanged(true);};
+
+// ── Performance: boot mode y recovery post-ad ─────────────────────────────────
+// Durante los primeros 2 segundos tras cargar, el motor JIT de Chromium aún
+// no ha optimizado funciones hot, y la GPU está calentándose. Reducimos
+// temporalmente la carga visual para que el primer impacto al usuario sea
+// fluido. Después de 2s, todo vuelve a normalidad con JIT caliente.
+let __bootMode=true;
+let __adRecoveryFrames=0;
+setTimeout(()=>{__bootMode=false;},2000);
+
+// Llamado por Kotlin cuando se cierra un anuncio fullscreen. Entramos en
+// modo recovery durante 30 frames (~500ms a 60fps) para dar tiempo a que el
+// pipeline GPU recupere texturas y prioridad.
+window.onAdClosed=function(){
+  __adRecoveryFrames=30;
+  // Forzar reconstrucción del cache de nebula al volver del ad (la GPU
+  // ha perdido la textura).
+  if(typeof nebulaCache!=='undefined')nebulaCache=null;
+};
+
+// Helper consultable desde el resto del código del juego para saber si
+// debemos reducir efectos. Es ligero y no genera overhead.
+window.__shouldReduceFx=function(){
+  if(__adRecoveryFrames>0){__adRecoveryFrames--;return true;}
+  return __bootMode;
+};
 
 // ── Audio ─────────────────────────────────────────────────────────────────────
 let AC=null;function ac(){return AC||(AC=new(window.AudioContext||window.webkitAudioContext)());}
@@ -552,6 +521,9 @@ let xplodeFlashes=[],bossDying=false,bossDyingTimer=0,bossDyingExpTimer=0;
 let comboCount=0,comboTimer=0;
 let bonusLifeAt=[500000,1000000],nextBonusIdx=0,bonusAnnTimer=0,bonusAnnScore=0;
 let levelsCompleted=0,canContinueWithAd=false;
+// Helper — GalaxBridge se expone directamente en window por Android addJavascriptInterface
+function bridge(){return typeof GalaxBridge!=='undefined'?GalaxBridge:null;}
+function bridgeLog(msg){try{bridge()&&bridge().log&&bridge().log(msg);}catch(e){}}
 const MAXLIVES=5;
 hiScore=parseInt(localStorage.getItem('galaxar_hi')||'0');
 
@@ -643,212 +615,21 @@ function drawEnemyAt(e){
   if(e.isPremium){
     _activePalette=(e.color==='#00ffff')?PALETTE_CYAN:PALETTE_GOLD;
   }
-  // ───────────────────────────────────────────────────────────────────────────
-  // OPT: SPRITE CACHE — usa drawImage cuando el sprite no cambia entre frames.
-  // Para sprites con animación interna (rotación, parpadeo, dmg) se construye
-  // una clave que incluye la variante; ahí el cache es 1 sola vez por variante.
-  // ───────────────────────────────────────────────────────────────────────────
-  // Defensa en profundidad: si por cualquier camino se llega aquí antes de que
-  // el cache esté inicializado (línea ~729 del script), caer al renderizado
-  // original — nunca peta el juego por una optimización.
-  if(!__spriteCache){
-    switch(e.type){
-      case 'drone':dDrone(e.hp<e.maxHp);break;
-      case 'wasp':dWasp();break;
-      case 'vortex':dVortex();break;
-      case 'phantom':dPhantom(e.alpha!=null?e.alpha:1);break;
-      case 'split':dSplit(e.hp);break;
-      case 'kami':dKami(e.diveActive);break;
-      case 'shooter':dShooter();break;
-      case 'nexus':dNexus(e.hp<e.maxHp);break;
-      case 'inferno':dInferno();break;
-      case 'oblivion':dOblivion();break;
-    }
-    _activePalette=null;
-    ctx.restore();
-    return;
-  }
-  const palKey=_activePalette===PALETTE_GOLD?'g':(_activePalette===PALETTE_CYAN?'c':'n');
-  let cachedKey=null;
   switch(e.type){
-    case 'drone':   cachedKey='drone:'+(e.hp<e.maxHp?'d':'k')+':'+palKey; break;
-    case 'wasp':    cachedKey='wasp:'+palKey; break;
-    case 'phantom': /* tiene aletas animadas → no cacheamos cuerpo+aletas; cacheamos cuerpo y dibujamos aletas aparte */ cachedKey='phantom:'+palKey; break;
-    case 'split':   cachedKey='split:'+e.hp+':'+palKey; break;
-    case 'kami':    cachedKey='kami:'+(e.diveActive?'d':'n')+':'+palKey; break;
-    case 'shooter': cachedKey='shooter:'+palKey; break;
-    case 'inferno': cachedKey='inferno:'+(frame%6<3?'a':'b')+':'+palKey; break;
-    // vortex, nexus, oblivion: tienen rotación continua → tratados aparte abajo
-  }
-  if(cachedKey){
-    const sp=__spriteCache.get(cachedKey,e.type,e);
-    ctx.drawImage(sp.canvas,-sp.cx,-sp.cy);
-    // Animaciones overlay que no se pueden cachear:
-    if(e.type==='phantom'){
-      // Aletas onduladas — solo cuando frame%2===0, igual que el original
-      if(frame%2===0){
-        ctx.strokeStyle=(_activePalette===null?'#aa44ff':_activePalette.mid||'#aa44ff')+'99';
-        ctx.lineWidth=1.5;const tf=frame*.09;
-        [-5,5].forEach((x,i)=>{ctx.beginPath();ctx.moveTo(x,8);ctx.quadraticCurveTo(x+Math.sin(tf+i)*5,15,x+Math.sin(tf+i)*3,22);ctx.stroke();});
-      }
-    }
-  } else if(e.type==='vortex'){
-    // OPT: cachear sprite plano y rotar el blit (1 drawImage en vez de ~14 fillRect)
-    const sp=__spriteCache.get('vortex:'+palKey,'vortex',e);
-    const r=frame*.055;
-    ctx.save();ctx.rotate(r);ctx.drawImage(sp.canvas,-sp.cx,-sp.cy);ctx.restore();
-    // Las 3 motas orbitales y centro son baratas (4 fillRect) — se mantienen
-    ctx.fillStyle=(_activePalette===null?'#ffcc00':_activePalette.bright||'#ffcc00');
-    for(let i=0;i<3;i++){const a=i/3*Math.PI*2+frame*.055*2.2;p(Math.round(Math.cos(a)*18)-2,Math.round(Math.sin(a)*18)-2,4,4);}
-    ctx.fillStyle=(_activePalette===null?'#fff':_activePalette.highlight||'#fff');p(-2,-2,4,4);
-    ctx.fillStyle=(_activePalette===null?'#ff8800':_activePalette.accent||'#ff8800');p(-1,-1,2,2);
-  } else if(e.type==='nexus'){
-    // Dos sprites cacheados con rotaciones distintas
-    const dmg=e.hp<e.maxHp;
-    const ringKey='nexusring:'+(dmg?'d':'n')+':'+palKey;
-    const coreKey='nexuscore:'+(dmg?'d':'n')+':'+palKey;
-    const sr=__spriteCache.get(ringKey,'nexusring',e,{dmg});
-    const sc=__spriteCache.get(coreKey,'nexuscore',e,{dmg});
-    const r=frame*.032;
-    ctx.save();ctx.rotate(-r);ctx.drawImage(sr.canvas,-sr.cx,-sr.cy);ctx.restore();
-    ctx.save();ctx.rotate(r*2);ctx.drawImage(sc.canvas,-sc.cx,-sc.cy);ctx.restore();
-    // Núcleo central inmóvil (5 fillRect)
-    const c2=dmg?'#ff6600':(_activePalette===null?'#00ddff':_activePalette.bright||'#00ddff');
-    const c3=dmg?'#ff2200':(_activePalette===null?'#aaffff':_activePalette.highlight||'#aaffff');
-    ctx.fillStyle=(_activePalette===null?'#000':_activePalette.black||'#000');p(-5,-5,10,10);
-    ctx.fillStyle=c2;p(-4,-4,8,8);
-    ctx.fillStyle=c3;p(-3,-3,6,6);
-    ctx.fillStyle=(_activePalette===null?'#fff':_activePalette.white||'#fff');p(-2,-3,2,2);
-  } else if(e.type==='oblivion'){
-    // Corona rotante cacheada + cuerpo estático cacheado
-    const cr=__spriteCache.get('oblivioncrown:'+palKey,'oblivioncrown',e);
-    const bd=__spriteCache.get('oblivionbody:'+palKey,'oblivionbody',e);
-    const r=frame*.028;
-    ctx.save();ctx.rotate(r);ctx.drawImage(cr.canvas,-cr.cx,-cr.cy);ctx.restore();
-    ctx.drawImage(bd.canvas,-bd.cx,-bd.cy);
-  } else {
-    // Fallback: si por algún motivo la clave no se generó, dibujar como antes
-    switch(e.type){
-      case 'drone':dDrone(e.hp<e.maxHp);break;
-      case 'wasp':dWasp();break;
-      case 'vortex':dVortex();break;
-      case 'phantom':dPhantom(e.alpha!=null?e.alpha:1);break;
-      case 'split':dSplit(e.hp);break;
-      case 'kami':dKami(e.diveActive);break;
-      case 'shooter':dShooter();break;
-      case 'nexus':dNexus(e.hp<e.maxHp);break;
-      case 'inferno':dInferno();break;
-      case 'oblivion':dOblivion();break;
-    }
+    case 'drone':dDrone(e.hp<e.maxHp);break;
+    case 'wasp':dWasp();break;
+    case 'vortex':dVortex();break;
+    case 'phantom':dPhantom(e.alpha!=null?e.alpha:1);break;
+    case 'split':dSplit(e.hp);break;
+    case 'kami':dKami(e.diveActive);break;
+    case 'shooter':dShooter();break;
+    case 'nexus':dNexus(e.hp<e.maxHp);break;
+    case 'inferno':dInferno();break;
+    case 'oblivion':dOblivion();break;
   }
   _activePalette=null;
   ctx.restore();
 }
-
-// ───────────────────────────────────────────────────────────────────────────
-// OPT: SPRITE CACHE — rasteriza cada variante a un canvas offscreen una sola
-// vez y lo blittea con drawImage en el loop principal. Bounding box generoso
-// (64×64) para que entren todos los sprites incluyendo halos. Origen centrado.
-// ───────────────────────────────────────────────────────────────────────────
-__spriteCache=(function(){
-  const cache=new Map();
-  const SIZE=72; // suficiente para el sprite más grande (inferno: ~36×24)
-  const HALF=SIZE/2;
-  function build(key,type,e,extra){
-    const nc=document.createElement('canvas');
-    nc.width=SIZE;nc.height=SIZE;
-    const c2=nc.getContext('2d');
-    c2.imageSmoothingEnabled=false;
-    // Pintar el sprite con la maquinaria existente usando un ctx temporal
-    const realCtx=ctx;
-    // Truco: las funciones d* dibujan en (0,0) usando la variable ctx del closure
-    // del módulo → swapeamos ctx temporalmente al canvas auxiliar.
-    ctx=c2;
-    ctx.translate(HALF,HALF);
-    // Para variantes que dependen de `frame` (parpadeos), las dibujamos
-    // manualmente para no tener que mutar `frame` en pleno juego.
-    switch(type){
-      case 'drone':   dDrone(extra&&extra.dmg||key.indexOf(':d:')>=0); break;
-      case 'wasp':    dWasp(); break;
-      case 'phantom': dPhantom(1); break;
-      case 'split':   { const hp=parseInt(key.split(':')[1],10); dSplit(hp); break; }
-      case 'kami':    dKami(key.indexOf(':d:')>=0); break;
-      case 'shooter': dShooter(); break;
-      case 'inferno': {
-        // Dos variantes del parpadeo: 'a' = fl=1 (brillante), 'b' = fl=.65 (atenuado)
-        const phase=key.split(':')[1];
-        const fl=phase==='a'?1:.65;
-        ctx.fillStyle=(_activePalette===null?'#880000':_activePalette.deepest||'#880000');p(-18,-10,36,6);p(-14,-16,28,6);p(-10,-20,20,4);
-        ctx.fillStyle=(_activePalette===null?'#cc1100':_activePalette.dark||'#cc1100');p(-16,-10,32,6);p(-12,-16,24,6);p(-8,-20,16,4);
-        ctx.fillStyle=(_activePalette===null?'#ff4422':_activePalette.mid||'#ff4422');p(-8,-14,16,4);p(-4,-18,8,4);
-        ctx.fillStyle=(_activePalette===null?`rgba(255,110,0,${fl})`:_activePalette.accent||`rgba(255,110,0,${fl})`);p(-14,0,4,9);p(-8,0,4,11);p(-2,0,4,13);p(4,0,4,11);p(10,0,4,9);
-        ctx.fillStyle=(_activePalette===null?`rgba(255,220,0,${fl*.85})`:_activePalette.bright||`rgba(255,220,0,${fl*.85})`);p(-13,0,2,5);p(-7,0,2,6);p(-1,0,2,7);p(5,0,2,6);p(11,0,2,5);
-        ctx.fillStyle=(_activePalette===null?'#ffeecc':_activePalette.highlight||'#ffeecc');p(-10,-13,4,4);p(6,-13,4,4);
-        ctx.fillStyle=(_activePalette===null?'#ff4400':_activePalette.accent||'#ff4400');p(-9,-12,2,2);p(7,-12,2,2);
-        break;
-      }
-      case 'vortex':  {
-        // Versión SIN rotación, SIN motas orbitales, SIN centro (esos se dibujan aparte)
-        ctx.fillStyle=(_activePalette===null?'#993300':_activePalette.deepest||'#993300');p(-4,-16,8,4);p(-8,-12,16,4);p(-10,-8,20,4);p(-10,-4,20,4);p(-8,0,16,4);p(-4,4,8,4);
-        ctx.fillStyle=(_activePalette===null?'#ff6600':_activePalette.mid||'#ff6600');p(-6,-12,12,4);p(-8,-8,16,4);p(-8,-4,16,4);p(-6,0,12,4);
-        ctx.fillStyle=(_activePalette===null?'#ffaa00':_activePalette.bright||'#ffaa00');p(-2,-8,4,8);
-        break;
-      }
-      case 'nexusring': {
-        const dmg=key.indexOf(':d:')>=0;
-        const c1=dmg?'#cc4400':(_activePalette===null?'#0088aa':_activePalette.dark||'#0088aa');
-        const c2c=dmg?'#ff6600':(_activePalette===null?'#00ddff':_activePalette.bright||'#00ddff');
-        ctx.fillStyle=c1;for(let i=0;i<8;i++){const a=i/8*Math.PI*2;p(Math.round(Math.cos(a)*18)-2,Math.round(Math.sin(a)*18)-2,4,4);}
-        ctx.fillStyle=c2c;for(let i=0;i<8;i++){const a=i/8*Math.PI*2+.2;p(Math.round(Math.cos(a)*22)-1,Math.round(Math.sin(a)*22)-1,3,3);}
-        break;
-      }
-      case 'nexuscore': {
-        const dmg=key.indexOf(':d:')>=0;
-        ctx.fillStyle=dmg?'#881100':(_activePalette===null?'#005566':_activePalette.deepest||'#005566');p(-8,-8,16,16);p(-10,-4,20,8);p(-4,-10,8,20);
-        ctx.fillStyle=dmg?'#cc2200':(_activePalette===null?'#0099bb':_activePalette.mid||'#0099bb');p(-6,-6,12,12);p(-8,-2,16,4);p(-2,-8,4,16);
-        break;
-      }
-      case 'oblivioncrown': {
-        // Brazos rotantes (sin la base central)
-        ctx.fillStyle=(_activePalette===null?'#330044':_activePalette.deepest||'#330044');
-        for(let i=0;i<6;i++){
-          const a=i/6*Math.PI*2;
-          const x1=Math.round(Math.cos(a)*12),y1=Math.round(Math.sin(a)*12);
-          const x2=Math.round(Math.cos(a)*22),y2=Math.round(Math.sin(a)*22);
-          p(x1-2,y1-2,4,4);p(x2-1,y2-1,3,3);
-          ctx.fillStyle=i%2===0?(_activePalette===null?'#00ff88':_activePalette.bright||'#00ff88'):(_activePalette===null?'#cc00ff':_activePalette.accent||'#cc00ff');
-          p(Math.round(Math.cos(a)*26)-1,Math.round(Math.sin(a)*26)-1,2,2);
-          ctx.fillStyle=(_activePalette===null?'#330044':_activePalette.deepest||'#330044');
-        }
-        break;
-      }
-      case 'oblivionbody': {
-        ctx.fillStyle=(_activePalette===null?'#220033':_activePalette.deepest||'#220033');p(-10,-10,20,20);p(-14,-6,28,12);p(-6,-14,12,28);
-        ctx.fillStyle=(_activePalette===null?'#660099':_activePalette.dark||'#660099');p(-8,-8,16,16);p(-12,-4,24,8);p(-4,-12,8,24);
-        ctx.fillStyle=(_activePalette===null?'#00ff88':_activePalette.mid||'#00ff88');p(-6,-6,12,12);
-        ctx.fillStyle=(_activePalette===null?'#000':_activePalette.black||'#000');p(-4,-4,8,8);
-        ctx.fillStyle=(_activePalette===null?'#cc00ff':_activePalette.accent||'#cc00ff');p(-3,-3,6,6);
-        ctx.fillStyle=(_activePalette===null?'#ffffff':_activePalette.white||'#ffffff');p(-1,-2,2,2);
-        break;
-      }
-    }
-    ctx=realCtx;
-    return {canvas:nc,cx:HALF,cy:HALF};
-  }
-  return {
-    get(key,type,e,extra){
-      let s=cache.get(key);
-      if(!s){
-        // Para que build() respete la paleta activa, hay que conservar _activePalette
-        s=build(key,type,e,extra);
-        cache.set(key,s);
-      }
-      return s;
-    },
-    clear(){cache.clear();},
-    size(){return cache.size;}
-  };
-})();
 
 // DRONE — rojo+azul como Galaxian fila inferior (más abundante)
 function dDrone(dmg){
@@ -988,175 +769,26 @@ function dOblivion(){
   ctx.fillStyle=(_activePalette===null?'#cc00ff':_activePalette.accent||'#cc00ff');p(-3,-3,6,6);
   ctx.fillStyle=(_activePalette===null?'#ffffff':_activePalette.white||'#ffffff');p(-1,-2,2,2);
 }
-
 function drawPlayer(x,y,shOn,triOn,rapOn){ctx.save();ctx.translate(x,y);const ps=clamp(W/420,.55,1);if(ps!==1)ctx.scale(ps,ps);const ft=frame%8<4?1:.65;ctx.fillStyle=`rgba(70,170,255,${ft*.55})`;p(-4,14,8,4);ctx.fillStyle=`rgba(130,210,255,${ft*.8})`;p(-2,18,4,4);ctx.fillStyle='rgba(255,255,255,.88)';p(-1,24,2,2);ctx.fillStyle='#0c2a4a';p(-24,4,10,8);p(14,4,10,8);ctx.fillStyle='#193f6e';p(-22,2,8,10);p(14,2,8,10);ctx.fillStyle='#2870b8';p(-22,2,6,2);p(16,2,6,2);ctx.fillStyle='#4db8ff';p(-22,2,2,2);p(20,2,2,2);ctx.fillStyle='#0c2a4a';p(-8,-2,16,16);ctx.fillStyle='#193f6e';p(-6,-6,12,18);ctx.fillStyle='#2870b8';p(-4,-10,8,18);ctx.fillStyle='#193f6e';p(-2,-14,4,6);ctx.fillStyle='#4db8ff';p(-2,-14,4,2);p(-4,-6,2,2);p(2,-6,2,2);ctx.fillStyle='#88ddff';p(-2,-12,4,6);ctx.fillStyle='rgba(200,240,255,.88)';p(-1,-11,2,4);if(triOn){ctx.fillStyle='#ffe44d';p(-10,4,4,4);p(6,4,4,4);}if(rapOn){ctx.fillStyle='#ff8800';p(-2,8,4,4);}if(shOn){const sp=.5+.5*Math.sin(frame*.12);ctx.strokeStyle=`rgba(80,200,255,${.45+.3*sp})`;ctx.lineWidth=2;ctx.beginPath();ctx.arc(0,0,32+sp*2,0,Math.PI*2);ctx.stroke();}ctx.restore();}
 function drawBossShip(b){ctx.save();ctx.translate(b.x,b.y);const pulse=.92+.08*Math.sin(frame*.07);ctx.scale(pulse,pulse);ctx.fillStyle='#160010';ctx.beginPath();ctx.moveTo(0,-48);ctx.lineTo(62,-16);ctx.lineTo(72,11);ctx.lineTo(52,37);ctx.lineTo(32,42);ctx.lineTo(16,21);ctx.lineTo(0,26);ctx.lineTo(-16,21);ctx.lineTo(-32,42);ctx.lineTo(-52,37);ctx.lineTo(-72,11);ctx.lineTo(-62,-16);ctx.closePath();ctx.fill();ctx.fillStyle=b.color+'2a';ctx.beginPath();ctx.moveTo(0,-48);ctx.lineTo(62,-16);ctx.lineTo(72,11);ctx.lineTo(52,37);ctx.lineTo(32,42);ctx.lineTo(16,21);ctx.lineTo(0,26);ctx.lineTo(-16,21);ctx.lineTo(-32,42);ctx.lineTo(-52,37);ctx.lineTo(-72,11);ctx.lineTo(-62,-16);ctx.closePath();ctx.fill();ctx.fillStyle='rgba(255,255,255,.04)';ctx.beginPath();ctx.moveTo(0,-48);ctx.lineTo(62,-16);ctx.lineTo(30,0);ctx.lineTo(0,-10);ctx.closePath();ctx.fill();ctx.beginPath();ctx.moveTo(0,-48);ctx.lineTo(-62,-16);ctx.lineTo(-30,0);ctx.lineTo(0,-10);ctx.closePath();ctx.fill();[[-55,9],[55,9]].forEach(([wx,wy])=>{ctx.fillStyle='#240015';ctx.beginPath();ctx.ellipse(wx,wy,13,7,0,0,Math.PI*2);ctx.fill();ctx.fillStyle=b.color;ctx.beginPath();ctx.ellipse(wx,wy,10,5,0,0,Math.PI*2);ctx.fill();ctx.fillStyle='rgba(255,255,150,.82)';ctx.beginPath();ctx.arc(wx,wy+7,2.8,0,Math.PI*2);ctx.fill();});ctx.fillStyle='#1e0015';ctx.beginPath();ctx.ellipse(0,0,27,38,0,0,Math.PI*2);ctx.fill();ctx.fillStyle=b.color+'72';ctx.beginPath();ctx.ellipse(0,0,21,31,0,0,Math.PI*2);ctx.fill();ctx.save();ctx.rotate(b.angle);ctx.strokeStyle=b.enraged?'#fff':b.color;ctx.lineWidth=2;ctx.globalAlpha=.55;ctx.beginPath();ctx.arc(0,0,34,0,Math.PI*2);ctx.stroke();ctx.fillStyle=b.enraged?'#fff':b.color;for(let i=0;i<6;i++){const a=i/6*Math.PI*2;ctx.beginPath();ctx.arc(Math.cos(a)*34,Math.sin(a)*34,3.5,0,Math.PI*2);ctx.fill();}ctx.restore();ctx.globalAlpha=1;const eg=ctx.createRadialGradient(0,0,2,0,0,15);eg.addColorStop(0,'rgba(255,255,255,.96)');eg.addColorStop(.4,b.color);eg.addColorStop(1,'rgba(0,0,0,0)');ctx.fillStyle=eg;ctx.beginPath();ctx.arc(0,0,15,0,Math.PI*2);ctx.fill();if(b.enraged){ctx.fillStyle=`rgba(255,40,40,${.06+.05*Math.sin(frame*.3)})`;ctx.beginPath();ctx.ellipse(0,0,78,52,0,0,Math.PI*2);ctx.fill();}ctx.restore();}
 
-// ── Object Pools ──────────────────────────────────────────────────────────────
-// Antes: bullets/eBullets/particles/scorePopups eran arrays normales con
-//   push() y splice() durante gameplay. Eso generaba allocaciones y
-//   forzaba al GC a correr cada pocos segundos = microcortes visibles.
-// Ahora: arrays pre-alocados con tamaño fijo. Cada slot tiene flag .alive.
-//   Para "spawn" buscamos slot libre (alive=false). Para "kill" ponemos
-//   alive=false. Cero allocaciones, cero GC.
-//
-// IMPORTANTE: el código de iteración sigue siendo `for(const x of array)`
-// pero ahora cada función SKIP slots con alive=false. Funcionalmente
-// idéntico al comportamiento anterior.
-
-const POOL_BULLETS=64;
-const POOL_EBULLETS=160;
-const POOL_PARTICLES=120;
-const POOL_SCOREPOPUPS=24;
-
-// Helper: crea pool con N slots y prepara propiedades.
-function makePool(n,factory){
-  const a=new Array(n);
-  for(let i=0;i<n;i++){a[i]=factory();a[i].alive=false;}
-  return a;
-}
-
-// Pool de bullets del jugador
-let bullets=makePool(POOL_BULLETS,()=>({x:0,y:0,vx:0,vy:0,dead:false,alive:false}));
-
-// Pool de bullets de enemigos
-let eBullets=makePool(POOL_EBULLETS,()=>({x:0,y:0,vx:0,vy:0,col:'#fff',r:3.5,dead:false,alive:false}));
-
-// Pool de partículas
-let particles=makePool(POOL_PARTICLES,()=>({x:0,y:0,vx:0,vy:0,r:1,col:'#fff',alpha:1,decay:.02,shock:false,alive:false}));
-
-// Pool de score popups
-let scorePopups=makePool(POOL_SCOREPOPUPS,()=>({x:0,y:0,pts:0,col:'#fff',alpha:1,vy:-1.2,life:85,alive:false}));
-
-// Helper: busca slot libre en un pool. Si no encuentra, sobrescribe el slot 0
-// (oldest-first). Esto NUNCA falla, garantiza que spawn siempre devuelve un slot.
-function poolAcquire(pool){
-  for(let i=0;i<pool.length;i++){if(!pool[i].alive){return pool[i];}}
-  // Pool lleno: reusar el más antiguo (slot 0). Caso raro, solo en stress test.
-  return pool[0];
-}
-
-// Helper: cuenta slots vivos (para draws condicionales como "if(scorePopups.length)")
-function poolAliveCount(pool){
-  let c=0;
-  for(let i=0;i<pool.length;i++)if(pool[i].alive)c++;
-  return c;
-}
-
 // ── Bullets ───────────────────────────────────────────────────────────────────
-// Helpers de spawn que usan el pool en vez de push().
-function spawnBullet(x,y,vx,vy){
-  const b=poolAcquire(bullets);
-  b.x=x;b.y=y;b.vx=vx;b.vy=vy;b.dead=false;b.alive=true;
-}
-function spawnEBullet(x,y,vx,vy,col,r){
-  const b=poolAcquire(eBullets);
-  b.x=x;b.y=y;b.vx=vx;b.vy=vy;b.col=col;b.r=r;b.dead=false;b.alive=true;
-}
-
-function drawBullets(){
-  ctx.fillStyle='#88ddff';
-  for(let i=0;i<bullets.length;i++){const b=bullets[i];if(!b.alive)continue;ctx.fillRect(b.x-2,b.y-10,4,16);}
-  ctx.fillStyle='#ffffff';
-  for(let i=0;i<bullets.length;i++){const b=bullets[i];if(!b.alive)continue;ctx.fillRect(b.x-1,b.y-8,2,8);}
-  // eBullets: dibujar en dos pasadas (sin allocar objeto byCol). Primera
-  // pasada agrupa por color usando cambios de fillStyle (no óptimo pero
-  // evita allocación de objeto).
-  for(let i=0;i<eBullets.length;i++){
-    const b=eBullets[i];if(!b.alive)continue;
-    ctx.fillStyle=b.col;
-    ctx.beginPath();ctx.arc(b.x,b.y,b.r||3.5,0,Math.PI*2);ctx.fill();
-  }
-  // Highlight blanco en cada eBullet
-  ctx.fillStyle='rgba(255,255,255,.65)';
-  for(let i=0;i<eBullets.length;i++){
-    const b=eBullets[i];if(!b.alive)continue;
-    const r=(b.r||3.5)*.35;
-    ctx.beginPath();ctx.arc(b.x-r*.3,b.y-r*.3,r,0,Math.PI*2);ctx.fill();
-  }
-}
+let bullets=[],eBullets=[];
+function drawBullets(){ctx.fillStyle='#88ddff';for(const b of bullets)ctx.fillRect(b.x-2,b.y-10,4,16);ctx.fillStyle='#ffffff';for(const b of bullets)ctx.fillRect(b.x-1,b.y-8,2,8);const byCol={};for(const b of eBullets)(byCol[b.col]||(byCol[b.col]=[])).push(b);for(const col in byCol){ctx.fillStyle=col;for(const b of byCol[col]){ctx.beginPath();ctx.arc(b.x,b.y,b.r||3.5,0,Math.PI*2);ctx.fill();}}ctx.fillStyle='rgba(255,255,255,.65)';for(const b of eBullets){const r=(b.r||3.5)*.35;ctx.beginPath();ctx.arc(b.x-r*.3,b.y-r*.3,r,0,Math.PI*2);ctx.fill();}}
 
 // ── Particles ─────────────────────────────────────────────────────────────────
-function spawnBurst(x,y,col,n){
-  n=n||20;const ps=W<500?.55:1;
-  for(let i=0;i<n;i++){
-    const a=Math.random()*Math.PI*2,spd=(Math.random()*5+1)*ps;
-    const p=poolAcquire(particles);
-    p.x=x;p.y=y;p.vx=Math.cos(a)*spd;p.vy=Math.sin(a)*spd;
-    p.r=(Math.random()*3.5+1.2)*ps;p.col=col;p.alpha=1;
-    p.decay=.024+Math.random()*.024;p.shock=false;p.alive=true;
-  }
-}
-function spawnSpark(x,y,col){
-  const ps=W<500?.55:1;
-  for(let i=0;i<7;i++){
-    const a=Math.random()*Math.PI*2;
-    const p=poolAcquire(particles);
-    p.x=x;p.y=y;
-    p.vx=Math.cos(a)*(Math.random()*3.5+1)*ps;
-    p.vy=Math.sin(a)*(Math.random()*3.5+1)*ps;
-    p.r=(1.2+Math.random()*1.4)*ps;p.col=col;p.alpha=1;
-    p.decay=.07;p.shock=false;p.alive=true;
-  }
-}
-function spawnShock(x,y,col){
-  const ps=W<500?.55:1;
-  const p=poolAcquire(particles);
-  p.x=x;p.y=y;p.vx=0;p.vy=0;
-  p.r=5*ps;p.col=col;p.alpha=.65;p.decay=.024;p.shock=true;p.alive=true;
-}
-function updateParticles(dt){
-  for(let i=0;i<particles.length;i++){
-    const p=particles[i];if(!p.alive)continue;
-    if(p.shock){p.r+=2.6*dt;p.alpha-=.028*dt;}
-    else{p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=.06*dt;p.alpha-=p.decay*dt;}
-    if(p.alpha<=.01)p.alive=false;
-  }
-}
-function drawParticles(){
-  const pa=ctx.globalAlpha;
-  for(let i=0;i<particles.length;i++){
-    const p=particles[i];if(!p.alive)continue;
-    ctx.globalAlpha=pa*p.alpha;
-    if(p.shock){
-      ctx.strokeStyle=p.col;ctx.lineWidth=2;
-      ctx.strokeRect(p.x-p.r,p.y-p.r,p.r*2,p.r*2);
-    }else{
-      const r=Math.max(1,Math.round(p.r));
-      ctx.fillStyle=p.col;ctx.fillRect(p.x-r,p.y-r,r*2,r*2);
-    }
-  }
-  ctx.globalAlpha=pa;
-}
+let particles=[];
+function spawnBurst(x,y,col,n){n=n||20;const ps=W<500?.55:1;for(let i=0;i<n;i++){const a=Math.random()*Math.PI*2,spd=(Math.random()*5+1)*ps;particles.push({x,y,vx:Math.cos(a)*spd,vy:Math.sin(a)*spd,r:(Math.random()*3.5+1.2)*ps,col,alpha:1,decay:.024+Math.random()*.024,shock:false});}}
+function spawnSpark(x,y,col){const ps=W<500?.55:1;for(let i=0;i<7;i++){const a=Math.random()*Math.PI*2;particles.push({x,y,vx:Math.cos(a)*(Math.random()*3.5+1)*ps,vy:Math.sin(a)*(Math.random()*3.5+1)*ps,r:(1.2+Math.random()*1.4)*ps,col,alpha:1,decay:.07,shock:false});}}
+function spawnShock(x,y,col){const ps=W<500?.55:1;particles.push({x,y,vx:0,vy:0,r:5*ps,col,alpha:.65,decay:.024,shock:true});}
+function updateParticles(dt){for(let i=particles.length-1;i>=0;i--){const p=particles[i];if(p.shock){p.r+=2.6*dt;p.alpha-=.028*dt;}else{p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=.06*dt;p.alpha-=p.decay*dt;}if(p.alpha<=.01)particles.splice(i,1);}if(particles.length>90)particles.length=90;}
+function drawParticles(){const pa=ctx.globalAlpha;for(const p of particles){ctx.globalAlpha=pa*p.alpha;if(p.shock){ctx.strokeStyle=p.col;ctx.lineWidth=2;ctx.strokeRect(p.x-p.r,p.y-p.r,p.r*2,p.r*2);}else{const r=Math.max(1,Math.round(p.r));ctx.fillStyle=p.col;ctx.fillRect(p.x-r,p.y-r,r*2,r*2);}}ctx.globalAlpha=pa;}
 
 // ── Score popups ──────────────────────────────────────────────────────────────
-function spawnScorePopup(x,y,pts,col){
-  const p=poolAcquire(scorePopups);
-  p.x=x;p.y=y;p.pts=pts;p.col=col||'#fff';
-  p.alpha=1;p.vy=-1.2;p.life=85;p.alive=true;
-}
-function updateScorePopups(dt){
-  for(let i=0;i<scorePopups.length;i++){
-    const p=scorePopups[i];if(!p.alive)continue;
-    p.y+=p.vy*dt;p.life-=dt;
-    p.alpha=Math.min(1,p.life/20);
-    if(p.life<=0)p.alive=false;
-  }
-}
-function drawScorePopups(){
-  // Quick check: si no hay vivos, salir sin entrar al save/font setup
-  let any=false;
-  for(let i=0;i<scorePopups.length;i++){if(scorePopups[i].alive){any=true;break;}}
-  if(!any)return;
-  const PF="'Press Start 2P',monospace";
-  const fs=W<500?9:11;
-  ctx.save();ctx.font=fs+'px '+PF;ctx.textAlign='center';ctx.textBaseline='middle';
-  for(let i=0;i<scorePopups.length;i++){
-    const p=scorePopups[i];if(!p.alive)continue;
-    ctx.globalAlpha=p.alpha;ctx.fillStyle=p.col;ctx.fillText(p.pts,p.x,p.y);
-  }
-  ctx.restore();
-}
+let scorePopups=[];
+function spawnScorePopup(x,y,pts,col){scorePopups.push({x,y,pts,col:col||'#fff',alpha:1,vy:-1.2,life:85});}
+function updateScorePopups(dt){for(let i=scorePopups.length-1;i>=0;i--){const p=scorePopups[i];p.y+=p.vy*dt;p.life-=dt;p.alpha=Math.min(1,p.life/20);if(p.life<=0)scorePopups.splice(i,1);}}
+function drawScorePopups(){if(!scorePopups.length)return;const PF="'Press Start 2P',monospace";const fs=W<500?9:11;ctx.save();ctx.font=fs+'px '+PF;ctx.textAlign='center';ctx.textBaseline='middle';for(const p of scorePopups){ctx.globalAlpha=p.alpha;ctx.fillStyle=p.col;ctx.fillText(p.pts,p.x,p.y);}ctx.restore();}
 
 // ── Power-ups ─────────────────────────────────────────────────────────────────
 let powerups=[];
@@ -1171,16 +803,14 @@ function initPlayer(){const py=H-clamp(H*.12,60,100);player={x:W/2,y:py,tx:W/2,t
 // ── Enemies ───────────────────────────────────────────────────────────────────
 let enemies=[],boss=null,fDir=1,fDropping=false,fDropLeft=0,fOffset=0,waveIdx=0,waveTotal=0,diveCD=0;
 const TYPE_MAP=['drone','wasp','vortex','phantom','split','kami','shooter','nexus','inferno','oblivion'];
-// Factores de escala visual por tipo para uniformar tamaños. El drone (48x28) es la
-// referencia. Bounding boxes medidos: kami=20x26 (61%), split=24x28 (68%),
-// wasp=40x24 (84%), phantom=32x36 (89%), inferno=36x33 (91%), shooter=40x33 (96%),
-// vortex=40x40 (105%), nexus=49x49 (129%), oblivion=56x56 (147%).
-const TYPE_VIS_SCALE={drone:1.00,wasp:1.18,vortex:0.96,phantom:1.12,split:1.35,kami:1.55,shooter:1.05,nexus:0.80,inferno:1.10,oblivion:0.72};
 // Filas con colores contrastados entre sí:
 // kami=amarillo, drone=azul+rojo, nexus=cian, phantom=púrpura, split=verde, shooter=azul marino
 const ROW_TYPES=['kami','drone','nexus','phantom','split','shooter'];
 // Color representativo por tipo para balas/explosiones
 const TYPE_COLOR={drone:'#4488ff',wasp:'#ff5522',vortex:'#ff8800',phantom:'#cc44ff',split:'#00ffaa',kami:'#ffee44',shooter:'#0044dd',nexus:'#00ccff',inferno:'#ff3300',oblivion:'#aa00ff'};
+// Compensación de tamaños visuales: cada sprite tiene un bounding box distinto,
+// este factor por tipo los iguala visualmente con el drone (nivel 1).
+const TYPE_VIS_SCALE={drone:1.00,wasp:1.18,vortex:0.96,phantom:1.12,split:1.35,kami:1.55,shooter:1.05,nexus:0.80,inferno:1.10,oblivion:0.72};
 // Color premium de la fila superior — dorado por defecto, o cian si el tipo del nivel ya es amarillo/dorado
 function premiumColor(baseColor){
   // Detectar si el color base es amarillo/dorado (R y G altos, B bajo)
@@ -1199,23 +829,7 @@ const isPremium=(r===0);
 const col=isPremium?premiumColor(baseCol):baseCol;
 list.push({x:bx,y:by,bx,by,w:ew,h:eh,hp,maxHp:hp,type:rowType,color:col,isPremium,alive:true,row:r,phase:Math.random()*Math.PI*2,flickTimer:0,alpha:1,fireRate:lvl.fr*lb,speed:lvl.speed*lb,diveActive:false,divePhase:'out',diveT:0,diveDelay:0,diveSX:0,diveSY:0,diveCX1:0,diveCY1:0,diveCX2:0,diveCY2:0,diveTX:0,diveTY:0,reX:0,reY:0,phantomPhase:Math.random()*Math.PI*2,phantomVisible:true,waveDelay:waveIdx===0?r*12:0,waveAlpha:0,justLanded:false});}return list;}
 function spawnWave(){const lvl=LEVELS[levelIdx];if(lvl.isBoss)return;enemies=[...enemies,...buildWave(lvl)];waveIdx++;}
-function initLevel(idx){
-  // Reset de pools: NO reasignar el array (perdería los slots pre-alocados).
-  // Solo marcamos todos los slots como muertos. Mantiene el pool intacto.
-  for(let i=0;i<bullets.length;i++){bullets[i].alive=false;bullets[i].dead=false;}
-  for(let i=0;i<eBullets.length;i++){eBullets[i].alive=false;eBullets[i].dead=false;}
-  for(let i=0;i<particles.length;i++)particles[i].alive=false;
-  for(let i=0;i<scorePopups.length;i++)scorePopups[i].alive=false;
-  powerups=[];enemies=[];boss=null;xplodeFlashes=[];
-  bossDying=false;bossDyingTimer=0;bossDyingExpTimer=0;
-  fDir=1;fDropping=false;fDropLeft=0;fOffset=0;
-  waveIdx=0;waveTotal=LEVELS[idx]&&LEVELS[idx].waveCount||3;
-  diveCD=0;tX=-1;tY=-1;hasTouchOffset=false;
-  initPlayer();
-  document.getElementById('boss-wrap').classList.remove('on');
-  if(LEVELS[idx].isBoss)spawnBossEntity(LEVELS[idx]);else spawnWave();
-  showAnn(idx);updateHUD();
-}
+function initLevel(idx){bullets=[];eBullets=[];particles=[];scorePopups=[];powerups=[];enemies=[];boss=null;xplodeFlashes=[];bossDying=false;bossDyingTimer=0;bossDyingExpTimer=0;fDir=1;fDropping=false;fDropLeft=0;fOffset=0;waveIdx=0;waveTotal=LEVELS[idx]&&LEVELS[idx].waveCount||3;diveCD=0;tX=-1;tY=-1;hasTouchOffset=false;initPlayer();document.getElementById('boss-wrap').classList.remove('on');if(LEVELS[idx].isBoss)spawnBossEntity(LEVELS[idx]);else spawnWave();showAnn(idx);updateHUD();}
 function spawnBossEntity(lvl){const lb=1+loopCount*.35;boss={x:W/2,y:-140,targetY:120,w:155,h:105,hp:Math.floor(130*lb),maxHp:Math.floor(130*lb),color:lvl.color,angle:0,shootTimer:0,moveTimer:0,targetX:W/2,entering:true,enraged:false,pattern:0,patternTimer:0};document.getElementById('boss-wrap').classList.add('on');updateBossBar();}
 function launchDive(){if(diveCD>0||annActive)return;if(Math.random()>.006)return;const pool=enemies.filter(e=>e.alive&&!e.diveActive);if(pool.length<2)return;pool.sort((a,b)=>a.by-b.by);const n=Math.min(levelIdx>=4?3:2,pool.length);pool.slice(0,n).forEach((e,i)=>{e.diveActive=true;e.divePhase='out';e.diveT=0;e.diveDelay=i*22;e.diveSX=e.x;e.diveSY=e.y;const side=e.x<W/2?1:-1;e.diveCX1=e.x+side*(90+Math.random()*80);e.diveCY1=e.y+60;e.diveCX2=player.x+(-40+Math.random()*80);e.diveCY2=H*.52;e.diveTX=player.x+(-28+Math.random()*56);e.diveTY=H+50;e.reX=e.bx+fOffset+(side*-60);e.reY=-40;});beep('dive');diveCD=Math.max(75,200-levelIdx*12)+Math.floor(Math.random()*70);}
 function updateDiver(e,dt){if(e.diveDelay>0){e.diveDelay--;return;}if(e.divePhase==='out'){e.diveT+=.009*dt;const t=Math.min(e.diveT,1),t1=1-t;e.x=t1*t1*t1*e.diveSX+3*t1*t1*t*e.diveCX1+3*t1*t*t*e.diveCX2+t*t*t*e.diveTX;e.y=t1*t1*t1*e.diveSY+3*t1*t1*t*e.diveCY1+3*t1*t*t*e.diveCY2+t*t*t*e.diveTY;if(t>=1){e.divePhase='return';e.diveT=0;e.x=e.reX;e.y=e.reY;}}else{e.diveT+=.016*dt;const t=Math.min(e.diveT,1),t1=1-t;const dx=e.bx+fOffset,dy=e.by;const cx=(e.reX+dx)/2,cy=e.reY*.3+dy*.7;e.x=t1*t1*e.reX+2*t1*t*cx+t*t*dx;e.y=t1*t1*e.reY+2*t1*t*cy+t*t*dy;if(t>=1){e.x=dx;e.y=dy;e.diveActive=false;e.diveT=0;e.divePhase='out';e.justLanded=true;}}}
@@ -1223,13 +837,13 @@ function moveFormation(dt){const lvl=LEVELS[levelIdx];if(!lvl||lvl.isBoss)return
 function enemyFire(e){const br=clamp(W*.008,3.5,5.5);const aimed=e.type==='shooter'||e.type==='nexus'||e.type==='phantom';const dx=player.x-e.x,dy=player.y-e.y,d=Math.hypot(dx,dy)||1;
 // Base: relativo a pantalla. +nivel: 0.15 por nivel (nivel 1→0, nivel 10→1.35). +loop: 0.2 por vuelta. Cap 9.
 const spd=clamp(clamp(H*.007,3,5)+levelIdx*.15+loopCount*.35,3,9);
-if(aimed)spawnEBullet(e.x,e.y+e.h/2,dx/d*spd,dy/d*spd,e.color,br);else spawnEBullet(e.x,e.y+e.h/2,(Math.random()-.5)*1.8,spd*(.8+Math.random()*.4),e.color,br*.85);}
+if(aimed)eBullets.push({x:e.x,y:e.y+e.h/2,vx:dx/d*spd,vy:dy/d*spd,col:e.color,r:br});else eBullets.push({x:e.x,y:e.y+e.h/2,vx:(Math.random()-.5)*1.8,vy:spd*(.8+Math.random()*.4),col:e.color,r:br*.85});}
 function updateBoss(){if(!boss)return;if(boss.entering){boss.y+=(boss.targetY-boss.y)*.032;if(Math.abs(boss.y-boss.targetY)<3)boss.entering=false;return;}boss.angle+=.019;boss.moveTimer++;if(!boss.enraged&&boss.hp<boss.maxHp*.4)boss.enraged=true;if(boss.moveTimer%(boss.enraged?100:180)===0)boss.targetX=100+Math.random()*(W-200);boss.x+=(boss.targetX-boss.x)*.018;boss.x=Math.max(90,Math.min(W-90,boss.x));boss.shootTimer++;const rate=W<500?(boss.enraged?26:44):(boss.enraged?18:32);if(boss.shootTimer>=rate){boss.shootTimer=0;boss.pattern=(boss.pattern+1)%5;bossFire();}updateBossBar();}
 function bossFire(){
 // Boss: base más moderada, +0.08 por loop (vs 0.2 normal enemies). El volumen de disparos ya es alto.
 const base=W<500?clamp(H*.006,2.8,4.5):clamp(H*.009,3.5,6);
 const spd=base+loopCount*.15;
-const pp=[()=>{for(let i=-2;i<=2;i++)spawnEBullet(boss.x+i*24,boss.y+52,i*1.5,spd*.95,boss.color,clamp(W*.008,3,5));},()=>{const dx=player.x-boss.x,dy=player.y-boss.y,d=Math.hypot(dx,dy)||1;for(let i=-1;i<=1;i++){const a=Math.atan2(dy,dx)+i*.22;spawnEBullet(boss.x,boss.y+52,Math.cos(a)*spd*1.1,Math.sin(a)*spd*1.1,boss.color,clamp(W*.007,2.5,4.5));}},()=>{for(let i=0;i<12;i++){const a=i/12*Math.PI*2;spawnEBullet(boss.x,boss.y,Math.cos(a)*4,Math.sin(a)*4,boss.color,clamp(W*.007,2.5,4.5));}},()=>{const dx=player.x-boss.x,dy=player.y-boss.y,d=Math.hypot(dx,dy)||1;spawnEBullet(boss.x,boss.y+52,dx/d*spd*1.55,dy/d*spd*1.55,'#fff',clamp(W*.009,3.5,6));},()=>{for(let i=0;i<8;i++){const a=i/8*Math.PI*2+boss.angle;spawnEBullet(boss.x+Math.cos(a)*36,boss.y+Math.sin(a)*36,Math.cos(a)*3,Math.sin(a)*3,boss.color,clamp(W*.006,2,4));}}];pp[boss.pattern%pp.length]();}
+const pp=[()=>{for(let i=-2;i<=2;i++)eBullets.push({x:boss.x+i*24,y:boss.y+52,vx:i*1.5,vy:spd*.95,col:boss.color,r:clamp(W*.008,3,5)});},()=>{const dx=player.x-boss.x,dy=player.y-boss.y,d=Math.hypot(dx,dy)||1;for(let i=-1;i<=1;i++){const a=Math.atan2(dy,dx)+i*.22;eBullets.push({x:boss.x,y:boss.y+52,vx:Math.cos(a)*spd*1.1,vy:Math.sin(a)*spd*1.1,col:boss.color,r:clamp(W*.007,2.5,4.5)});}},()=>{for(let i=0;i<12;i++){const a=i/12*Math.PI*2;eBullets.push({x:boss.x,y:boss.y,vx:Math.cos(a)*4,vy:Math.sin(a)*4,col:boss.color,r:clamp(W*.007,2.5,4.5)});}},()=>{const dx=player.x-boss.x,dy=player.y-boss.y,d=Math.hypot(dx,dy)||1;eBullets.push({x:boss.x,y:boss.y+52,vx:dx/d*spd*1.55,vy:dy/d*spd*1.55,col:'#fff',r:clamp(W*.009,3.5,6)});},()=>{for(let i=0;i<8;i++){const a=i/8*Math.PI*2+boss.angle;eBullets.push({x:boss.x+Math.cos(a)*36,y:boss.y+Math.sin(a)*36,vx:Math.cos(a)*3,vy:Math.sin(a)*3,col:boss.color,r:clamp(W*.006,2,4)});}}];pp[boss.pattern%pp.length]();}
 function updateBossBar(){if(!boss)return;document.getElementById('boss-fill').style.width=Math.max(0,boss.hp/boss.maxHp*100)+'%';}
 
 // ── Input ─────────────────────────────────────────────────────────────────────
@@ -1270,8 +884,6 @@ function hideModal(){document.getElementById('modal').classList.add('hide');}
 function el(id){return document.getElementById(id);}
 function showLevelModal(mode){
   modalMode=mode;
-  // Sincronizar visibilidad sprite desfile DOM: solo visible en estado título
-  if(mode==='title'){PDE.show();}else{PDE.hide();}
   el('m-stars').style.display='none';el('m-scores').style.display='none';
   el('m-btn2-wrap').style.display='none';el('m-btn3-wrap').style.display='none';
   el('m-hi').textContent='';el('m-btn').onclick=modalAction;el('m-info').innerHTML='';
@@ -1300,8 +912,10 @@ function showLevelModal(mode){
     // Flujo: botón 1 = continuar con rewarded; botón 2 = menú principal con intersticial.
     // Si no hay rewarded, sólo se muestra menú principal con intersticial.
     canContinueWithAd=false;
-    const goMenuWithAd=function(){try{window.GalaxBridge?.showInterstitial();}catch(e){}goMenu();};
-    if(window.GalaxBridge?.isRewardedReady?.()){
+    const goMenuWithAd=function(){try{const b=bridge();if(b)b.showInterstitial();}catch(e){}goMenu();};
+    const b=bridge();
+    const rewardReady=b&&typeof b.isRewardedReady==='function'&&!!b.isRewardedReady();
+    if(rewardReady){
       canContinueWithAd=true;
       el('m-btn').innerHTML=t('watchAd');
       el('m-btn').onclick=watchAdToContinue;
@@ -1315,68 +929,40 @@ function showLevelModal(mode){
   }
   showModal();
 }
-function goMenu(){hideModal();document.getElementById('boss-wrap').classList.remove('on');document.getElementById('ctrl-btns').classList.remove('on');document.getElementById('pause-overlay').classList.remove('on');isPaused=false;PDE.show();showLevelModal('title');}
+function goMenu(){hideModal();document.getElementById('boss-wrap').classList.remove('on');document.getElementById('ctrl-btns').classList.remove('on');document.getElementById('pause-overlay').classList.remove('on');isPaused=false;showLevelModal('title');}
 function modalAction(){
   if(modalMode==='title')startGame();
   else if(modalMode==='complete'){
     hideModal();levelIdx++;if(levelIdx>=LEVELS.length)levelIdx=0;initLevel(levelIdx);state='playing';
     levelsCompleted++;
+    // Interstitial cada 5 niveles completados (no cada 3 como la versión vieja)
     if(levelsCompleted>0&&levelsCompleted%5===0){
-      try{window.GalaxBridge?.showInterstitial();}catch(e){}
+      try{const b=bridge();if(b)b.showInterstitial();}catch(e){}
     }
   }
-  else if(modalMode==='gameover'){try{window.GalaxBridge?.showInterstitial();}catch(e){}goMenu();}
+  else if(modalMode==='gameover'){
+    // Si el usuario llega aquí desde el botón principal (cuando no hay rewarded),
+    // ya se ha mostrado el interstitial al pulsar mainMenu. Solo cerramos.
+    try{const b=bridge();if(b)b.showInterstitial();}catch(e){}
+    goMenu();
+  }
 }
-// AdMob rewarded — igual que el original
+// AdMob rewarded
 function watchAdToContinue(){
   try{
-    if(window.GalaxBridge?.isRewardedReady()){
-      window.GalaxBridge.showRewarded();
+    const b=bridge();
+    if(b&&typeof b.isRewardedReady==='function'&&b.isRewardedReady()){
+      b.showRewarded();
     }else{hideModal();startGame();}
   }catch(e){hideModal();startGame();}
 }
-window.onRewardGranted=function(){
-  if(canContinueWithAd){
-    canContinueWithAd=false;
-    hideModal();
-    lives=1;invOn=true;invTimer=200;
-    const py=H-clamp(H*.12,60,100);
-    player.x=W/2;player.y=py;player.tx=W/2;player.ty=py;
-    mX=W/2;mY=py;
-    flashTimer=0;
-    state='playing';
-    updateHUD();
-    document.getElementById('ctrl-btns').classList.add('on');
-    beep('pu');
-  }
-};
+window.onRewardGranted=function(){if(canContinueWithAd){canContinueWithAd=false;hideModal();lives=1;invOn=true;invTimer=200;const py=H-clamp(H*.12,60,100);player.x=W/2;player.y=py;player.tx=W/2;player.ty=py;mX=W/2;mY=py;flashTimer=0;state='playing';updateHUD();document.getElementById('ctrl-btns').classList.add('on');beep('pu');}};
 
 // ── Title screen ──────────────────────────────────────────────────────────────
 const PARADE=LEVELS.filter(l=>!l.isBoss).map((l,i)=>({type:TYPE_MAP[i]||'drone',color:TYPE_COLOR[TYPE_MAP[i]]||'#ffffff',name:l.name||'?',pts:(10+i*10)+' '+t('pts')}));
 let paradeIdx=0,paradeX=0,paradePhase='enter',paradeTimer=0;
-// Acumulador de tiempo para desfile — 1 tick = 16.67ms (60Hz efectivo).
-// En pantallas 90/120Hz el rAF dispara más rápido; el acumulador solo permite
-// avanzar enteros cuando se completa el tick, manteniendo la velocidad constante
-// en tiempo real sin introducir jitter por fluctuaciones de dt.
-let _paradeAcc=0;
 const PARADE_PAUSE=85;
 function initParade(){paradeIdx=0;paradePhase='enter';paradeX=W+80;paradeTimer=0;}
-
-// ── Desfile DOM — sprite en canvas pequeño fuera del canvas principal ────
-// Evita el lag visible del movimiento en WebView Android: CSS transform se
-// compone directamente en GPU a la frecuencia nativa de pantalla.
-
-// ── Title screen — todo dibujado en vivo, imitando el flujo de gameplay ─────
-// (buildTitleCache eliminado: cachear la pantalla completa del título causa
-// microlag en WebView 120Hz. Gameplay es fluido porque dibuja en primitivas
-// simples cada frame; el título ahora hace lo mismo.)
-
-// ── Title screen ── COPIA EXACTA DE LA VERSIÓN VIEJA QUE IBA FLUIDA ─────────
-// Esta función reemplaza la nueva drawTitleScreen que tenía jitter. La vieja
-// va idéntica de fluida que el gameplay. Sólo se ha cambiado "GALAX" por
-// "DRONE" en el logo de texto cacheado y la llamada a drawEnemyAt usa el
-// mismo dummy enemy que la versión vieja.
-
 // Cache del logo — se regenera solo cuando cambia el tamaño
 function buildLogoCache(logoSize,logoY){
   const pw=Math.round(logoSize*6.5),ph=logoSize+20;
@@ -1466,154 +1052,11 @@ const prevSS=spriteScale;spriteScale=eScale;drawEnemyAt(dummy);spriteScale=prevS
 if(paradePhase==='pause'){const fade=paradeTimer>15?1:paradeTimer/15;const spriteH=Math.round(40*eScale);ctx.save();ctx.globalAlpha=fade;ctx.textAlign='center';ctx.font=TSL+'px '+PF;ctx.fillStyle=pa.color;ctx.fillText(pa.name,paradeX,eCY+spriteH+20);ctx.font=TS+'px '+PF;ctx.fillStyle='#ffe44d';ctx.fillText(pa.pts,paradeX,eCY+spriteH+20+TSL+6);ctx.restore();}
 ctx.save();ctx.textAlign='center';ctx.font=TS+'px '+PF;ctx.fillStyle='rgba(180,230,255,.85)';ctx.fillText(t('autofire'),W/2,iy);ctx.globalAlpha=.4+.6*Math.abs(Math.sin(frame*.025));ctx.font=TSL+'px '+PF;ctx.fillStyle='#fff';ctx.fillText(t('tap'),W/2,tapY);ctx.restore();}
 
-
-// ── Title screen — fondo y estrellas en vivo (como gameplay), logo cacheado ──
-// Hipótesis: gameplay va fluido porque después del fondo solo hay operaciones
-// pequeñas y localizadas (enemigos ~40px, balas, partículas). El título
-// repintaba cada frame un logo masivo con sombras, 4 contornos y gradientes,
-// lo cual invalida una región grande del canvas y afecta al resto del render.
-// Solución: cachear el logo+textos estáticos en un bitmap pequeño (ancho
-// completo pero solo la zona del título, ~200px de alto) y blittearlo.
-function buildTitleLogoCache(){
-  const PF="'Press Start 2P',monospace";
-  // ── Logo DRONE — pixel-art arcade clásico ───────────────────────────────
-  // Bitmap 5×7 por letra, separación 1px = 6px por letra.
-  // DRONE = 5 letras × 6 - 1 = 29 unidades de ancho × 7 de alto.
-  // Bitmaps: 1 = pixel lleno, 0 = vacío
-  const FONT={
-    G:["11111","10000","10011","10001","10001","11111","00000"],
-    A:["01110","10001","10001","11111","10001","10001","00000"],
-    L:["10000","10000","10000","10000","10000","11111","00000"],
-    X:["10001","10001","01010","00100","01010","10001","00000"],
-    D:["11110","10001","10001","10001","10001","11110","00000"],
-    R:["11110","10001","10001","11110","10010","10001","00000"],
-    O:["01110","10001","10001","10001","10001","01110","00000"],
-    N:["10001","11001","10101","10011","10001","10001","00000"],
-    E:["11111","10000","11110","10000","10000","11111","00000"],
-  };
-  const WORD='DRONE';
-  // Escala del pixel según pantalla — más grande = letra más chunky
-  const px=W<500?6:W<800?8:10;
-  const letterW=5,letterH=7,gap=1;
-  const wordW=WORD.length*(letterW+gap)-gap; // 29
-  const logoPxW=wordW*px;
-  const logoPxH=letterH*px;
-  // Margen para el borde oscuro (1px por cada lado) + highlight superior
-  const borderPx=1;
-  const bmpW=W;
-  // Altura del bitmap: logo + subtítulo + record con margen
-  const logoY=72; // top del logo (en coords CSS)
-  const TS=W<500?9:11;
-  const subY=logoY+logoPxH+28;
-  const hiY=subY+24;
-  const bmpH=hiY+12;
-
-  const nc=document.createElement('canvas');
-  nc.width=W;nc.height=bmpH;
-  const c2=nc.getContext('2d');
-  c2.imageSmoothingEnabled=false;
-
-  // Posición horizontal del logo (centrado)
-  const startX=Math.round((W-logoPxW)/2);
-
-  // Paleta arcade clásica: amarillo brillante + rojo + blanco highlight + sombra oscura
-  const COL_MAIN='#ffcc00';    // amarillo arcade
-  const COL_HIGHLIGHT='#ffff88'; // highlight superior
-  const COL_SHADOW='#993300';  // borde rojo oscuro
-  const COL_GLINT='#ffffff';   // pequeños destellos blancos
-
-  // ── Paso 1: sombra/borde oscuro (offset 1px abajo-derecha + contorno) ───
-  c2.fillStyle=COL_SHADOW;
-  for(let l=0;l<WORD.length;l++){
-    const bm=FONT[WORD[l]];
-    const lx=startX+l*(letterW+gap)*px;
-    for(let y=0;y<letterH;y++){
-      const row=bm[y];
-      for(let x=0;x<letterW;x++){
-        if(row[x]==='1'){
-          // Borde: dibujar un pixel desplazado en 8 direcciones (contorno)
-          c2.fillRect(lx+x*px-borderPx,logoY+y*px,px+borderPx*2,px+borderPx*2);
-        }
-      }
-    }
-  }
-
-  // ── Paso 2: cuerpo principal en amarillo ─────────────────────────────
-  c2.fillStyle=COL_MAIN;
-  for(let l=0;l<WORD.length;l++){
-    const bm=FONT[WORD[l]];
-    const lx=startX+l*(letterW+gap)*px;
-    for(let y=0;y<letterH;y++){
-      const row=bm[y];
-      for(let x=0;x<letterW;x++){
-        if(row[x]==='1'){
-          c2.fillRect(lx+x*px,logoY+y*px,px,px);
-        }
-      }
-    }
-  }
-
-  // ── Paso 3: highlight superior (primer tercio en amarillo claro) ─────
-  c2.fillStyle=COL_HIGHLIGHT;
-  for(let l=0;l<WORD.length;l++){
-    const bm=FONT[WORD[l]];
-    const lx=startX+l*(letterW+gap)*px;
-    // Solo las filas 0 y 1 si están activas, y solo un pedazo
-    for(let y=0;y<2;y++){
-      const row=bm[y];
-      for(let x=0;x<letterW;x++){
-        if(row[x]==='1'){
-          // Línea superior de cada pixel (hace efecto de gradiente arcade)
-          c2.fillRect(lx+x*px,logoY+y*px,px,Math.max(1,Math.round(px*0.4)));
-        }
-      }
-    }
-  }
-
-  // ── Paso 4: destellos (pequeños pixels blancos en esquinas clave) ────
-  // Un "glint" en la esquina superior-izquierda de la primera letra,
-  // típico de los logos arcade que simulan reflejo metálico.
-  c2.fillStyle=COL_GLINT;
-  // Glint en G (letra 0): arriba-izquierda
-  c2.fillRect(startX+0*px,logoY+0*px,px,px);
-  c2.fillRect(startX+1*px,logoY+0*px,px,Math.round(px*0.5));
-
-  // ── Línea decorativa debajo del logo ──────────────────────────────────
-  const lineY=logoY+logoPxH+6;
-  const lineW=logoPxW+20;
-  const lineX=Math.round((W-lineW)/2);
-  // Línea principal rojo
-  c2.fillStyle=COL_SHADOW;
-  c2.fillRect(lineX,lineY,lineW,2);
-  // Línea superior amarilla más fina
-  c2.fillStyle=COL_MAIN;
-  c2.fillRect(lineX+4,lineY-1,lineW-8,1);
-
-  // ── Subtítulo ──────────────────────────────────────────────────────────
-  c2.textAlign='center';
-  c2.font=TS+'px '+PF;
-  c2.fillStyle='rgba(255,220,130,.9)';
-  c2.fillText(t('tagline'),W/2,subY);
-  if(hiScore>0){
-    c2.fillStyle='#ffcc00';
-    c2.fillText(t('best')+' '+hiScore.toLocaleString(),W/2,hiY);
-  }
-
-  _titleLogoCache=nc;
-  _titleLogoKey=W+'@'+hiScore;
-}
-
 // ── Pause / Mute ──────────────────────────────────────────────────────────────
-function togglePause(){if(state!=='playing')return;isPaused=!isPaused;if(!isPaused){mX=player.x;mY=player.y;tX=-1;tY=-1;hasTouchOffset=false;window.resumeAudio&&window.resumeAudio();}else{window.suspendAudio&&window.suspendAudio();}document.getElementById('pause-overlay').classList.toggle('on',isPaused);document.getElementById('btn-pause').textContent=isPaused?'▶':'⏸';}
-function toggleMute(){isMuted=!isMuted;document.getElementById('btn-mute').textContent=isMuted?'🔇':'🔊';}
-function pauseGoMenu(){isPaused=false;document.getElementById('pause-overlay').classList.remove('on');goMenu();}
-
-// ── Suspend/resume del AudioContext ────────────────────────────────────────────
-// Cuando la app pierde foco (anuncio AdMob, pantalla apagada, app en background,
-// llamada entrante), el AudioContext sigue procesando osciladores en su thread
-// propio aunque el rAF esté suspendido. Para silenciar TODO el audio
-// instantáneamente, suspendemos el AudioContext entero. Es la API estándar de
-// Web Audio para este caso.
+// ── Audio suspend/resume ──────────────────────────────────────────────────────
+// Suspender el AudioContext entero silencia TODO el audio instantáneamente,
+// incluyendo el drone ambient. Es la API estándar de Web Audio para el caso
+// de pausa de juego o paso a background (incluye fullscreen ads).
 window.suspendAudio=function(){
   try{
     if(AC&&AC.state==='running')AC.suspend();
@@ -1625,8 +1068,11 @@ window.resumeAudio=function(){
   }catch(e){}
 };
 
-// Visibilitychange: pausar juego y suspender audio cuando la pestaña/app
-// pasa a background (incluye fullscreen ads).
+function togglePause(){if(state!=='playing')return;isPaused=!isPaused;if(!isPaused){mX=player.x;mY=player.y;tX=-1;tY=-1;hasTouchOffset=false;window.resumeAudio();}else{window.suspendAudio();}document.getElementById('pause-overlay').classList.toggle('on',isPaused);document.getElementById('btn-pause').textContent=isPaused?'▶':'⏸';}
+function toggleMute(){isMuted=!isMuted;document.getElementById('btn-mute').textContent=isMuted?'🔇':'🔊';}
+function pauseGoMenu(){isPaused=false;document.getElementById('pause-overlay').classList.remove('on');goMenu();}
+// Visibilitychange: pausar juego y suspender audio cuando la pestaña/app pasa a
+// background (incluye fullscreen ads, suspensión del sistema, AAOS background).
 document.addEventListener('visibilitychange',()=>{
   if(document.hidden){
     if(state==='playing'&&!isPaused)togglePause();
@@ -1662,133 +1108,45 @@ const BSPD=Math.round(clamp(H*.022,10,16));
 function update(dt){if(state==='title'){frame+=dt;moveBg(dt);return;}if(state!=='playing'||isPaused)return;frame+=dt;moveBg(dt);if(diveCD>0)diveCD-=dt;if(bonusAnnTimer>0)bonusAnnTimer-=dt;
 let tx,ty;if(tX>=0&&hasTouchOffset){tx=tX+touchOffX;ty=tY+touchOffY;}else{tx=tX>=0?tX:mX;ty=tY>=0?tY:mY;}
 player.tx=Math.max(26,Math.min(W-26,tx));player.ty=Math.max(H*.45,Math.min(H-clamp(H*.05,20,40),ty));player.x+=(player.tx-player.x)*.17*dt;player.y+=(player.ty-player.y)*.17*dt;player.x=Math.max(26,Math.min(W-26,player.x));
-if(player.shootCD>0)player.shootCD-=dt;if(player.shootCD<=0&&!annActive){const cd=player.rapid>0?6:12;player.shootCD=cd;const boff=clamp(W/420,.55,1)*26;spawnBullet(player.x,player.y-boff,0,-BSPD);if(player.tri>0){spawnBullet(player.x,player.y-20,-3.5,-BSPD+1.3);spawnBullet(player.x,player.y-20,3.5,-BSPD+1.3);}beep('shoot');}
+if(player.shootCD>0)player.shootCD-=dt;if(player.shootCD<=0&&!annActive){const cd=player.rapid>0?6:12;player.shootCD=cd;const boff=clamp(W/420,.55,1)*26;bullets.push({x:player.x,y:player.y-boff,vx:0,vy:-BSPD});if(player.tri>0){bullets.push({x:player.x,y:player.y-20,vx:-3.5,vy:-BSPD+1.3});bullets.push({x:player.x,y:player.y-20,vx:3.5,vy:-BSPD+1.3});}beep('shoot');}
 if(player.tri>0)player.tri-=dt;if(player.rapid>0)player.rapid-=dt;if(player.shield>0)player.shield-=dt;if(invTimer>0){invTimer-=dt;if(invTimer<=0){invTimer=0;invOn=false;}}if(comboTimer>0){comboTimer-=dt;if(comboTimer<=0){comboTimer=0;comboCount=0;}}if(flashTimer>0)flashTimer-=dt;
 if(bossDying&&boss){bossDyingTimer+=dt;bossDyingExpTimer-=dt;if(bossDyingExpTimer<=0){const ox=(Math.random()-.5)*boss.w*.9,oy=(Math.random()-.5)*boss.h*.9;spawnBurst(boss.x+ox,boss.y+oy,boss.color,W<500?16:28);spawnShock(boss.x+ox,boss.y+oy,boss.color);xplodeFlashes.push({x:boss.x+ox,y:boss.y+oy,r:55,alpha:.5,col:boss.color,decay:.055});beep('bigx');bossDyingExpTimer=18-Math.min(11,bossDyingTimer*.15);}boss.x+=Math.sin(bossDyingTimer*.8)*2.2*dt;if(bossDyingTimer>100){const pr=Math.min(1,(bossDyingTimer-100)/40);flashTimer=5;flashCol='rgba(255,255,255,'+pr*.7+')';}if(bossDyingTimer>=138){for(let i=0;i<5;i++){const ox2=(Math.random()-.5)*boss.w,oy2=(Math.random()-.5)*boss.h;spawnBurst(boss.x+ox2,boss.y+oy2,boss.color,W<500?22:40);spawnShock(boss.x+ox2,boss.y+oy2,boss.color);}flashTimer=32;flashCol='rgba(255,255,255,.92)';boss=null;bossDying=false;bossDyingTimer=0;invOn=false;invTimer=0;beep('lvlup');setTimeout(()=>showLevelModal('complete'),850);state='levelmodal';}}
 for(let i=xplodeFlashes.length-1;i>=0;i--){xplodeFlashes[i].alpha-=xplodeFlashes[i].decay*dt;if(xplodeFlashes[i].alpha<=0)xplodeFlashes.splice(i,1);}
-for(let i=0;i<bullets.length;i++){const b=bullets[i];if(!b.alive)continue;b.x+=b.vx*dt;b.y+=b.vy*dt;if(b.y<-35||b.x<-35||b.x>W+35)b.alive=false;}
-for(let i=0;i<eBullets.length;i++){const b=eBullets[i];if(!b.alive)continue;b.x+=b.vx*dt;b.y+=b.vy*dt;if(b.y>H+25||b.y<-35||b.x<-35||b.x>W+35)b.alive=false;}
+for(let i=bullets.length-1;i>=0;i--){const b=bullets[i];b.x+=b.vx*dt;b.y+=b.vy*dt;if(b.y<-35||b.x<-35||b.x>W+35)bullets.splice(i,1);}
+if(eBullets.length>130)eBullets.splice(0,eBullets.length-130);for(let i=eBullets.length-1;i>=0;i--){const b=eBullets[i];b.x+=b.vx*dt;b.y+=b.vy*dt;if(b.y>H+25||b.y<-35||b.x<-35||b.x>W+35)eBullets.splice(i,1);}
 for(const pu of powerups){pu.y+=3.2*dt;pu.angle+=.045*dt;if(Math.hypot(pu.x-player.x,pu.y-player.y)<30){pu.dead=true;applyPU(pu.type);beep('pu');spawnBurst(pu.x,pu.y,PU_COL[pu.type],10);}}powerups=powerups.filter(pu=>!pu.dead&&pu.y<H+35);
 moveFormation(dt);updateBoss();updateParticles(dt);updateScorePopups(dt);
-for(let bi=0;bi<bullets.length;bi++){
-  const b=bullets[bi];if(!b.alive||b.dead)continue;
-  if(boss&&!boss.entering&&Math.abs(b.x-boss.x)<boss.w/2&&Math.abs(b.y-boss.y)<boss.h/2){
-    b.dead=true;boss.hp--;spawnSpark(b.x,b.y,boss.color);beep('bh');updateBossBar();
-    if(boss.hp<=0&&!bossDying){
-      bossDying=true;bossDyingTimer=0;bossDyingExpTimer=0;boss.enraged=false;
-      for(let j=0;j<eBullets.length;j++)eBullets[j].alive=false;
-      invOn=true;invTimer=9999;addScore(4000);
-      document.getElementById('boss-wrap').classList.remove('on');beep('bigx');
-    }
-    continue;
-  }
-  for(const e of enemies){
-    if(!e.alive)continue;
-    if(e.type==='phantom'&&!e.phantomVisible)continue;
-    if(Math.abs(b.x-e.x)<e.w/2+3&&Math.abs(b.y-e.y)<e.h/2+3){
-      b.dead=true;e.hp--;e.flickTimer=7;spawnSpark(b.x,b.y,e.color);
-      if(e.hp>0&&e.type==='nexus')beep('bh');
-      if(e.hp<=0){
-        e.alive=false;
-        const diveMul=e.diveActive?2:1;
-        const premiumMul=e.isPremium?2:1;
-        const pts=(110+levelIdx*28)*diveMul*premiumMul;
-        addScore(pts);addCombo();spawnBurst(e.x,e.y,e.color);beep('xplode');
-        xplodeFlashes.push({x:e.x,y:e.y,r:75,alpha:.32,col:e.color,decay:.05});
-        maybeSpawnPU(e.x,e.y);
-        if(e.diveActive||e.isPremium){spawnScorePopup(e.x,e.y-10,pts,e.color);}
-        if(e.type==='split'&&e.maxHp===2){
-          const off=Math.round(clamp(W*.055,12,20));
-          [-off,off].forEach(dx=>{enemies.push({...e,x:e.x+dx,y:e.y,bx:e.bx+dx,by:e.by,hp:1,maxHp:1,alive:true,flickTimer:0,type:'wasp',color:TYPE_COLOR['wasp'],isPremium:false,speed:e.speed*1.3,waveDelay:0,waveAlpha:1,diveActive:false,diveT:0});});
-        }
-      }
-      break;
-    }
-  }
+for(const b of bullets){
+  if(boss&&!boss.entering&&Math.abs(b.x-boss.x)<boss.w/2&&Math.abs(b.y-boss.y)<boss.h/2){b.dead=true;boss.hp--;spawnSpark(b.x,b.y,boss.color);beep('bh');updateBossBar();if(boss.hp<=0&&!bossDying){bossDying=true;bossDyingTimer=0;bossDyingExpTimer=0;boss.enraged=false;eBullets=[];invOn=true;invTimer=9999;addScore(4000);document.getElementById('boss-wrap').classList.remove('on');beep('bigx');}continue;}
+  for(const e of enemies){if(!e.alive)continue;if(e.type==='phantom'&&!e.phantomVisible)continue;if(Math.abs(b.x-e.x)<e.w/2+3&&Math.abs(b.y-e.y)<e.h/2+3){b.dead=true;e.hp--;e.flickTimer=7;spawnSpark(b.x,b.y,e.color);
+if(e.hp>0&&e.type==='nexus')beep('bh'); // sonido metalico al primer impacto nexus
+if(e.hp<=0){e.alive=false;const diveMul=e.diveActive?2:1;const premiumMul=e.isPremium?2:1;const pts=(110+levelIdx*28)*diveMul*premiumMul;addScore(pts);addCombo();spawnBurst(e.x,e.y,e.color);beep('xplode');xplodeFlashes.push({x:e.x,y:e.y,r:75,alpha:.32,col:e.color,decay:.05});maybeSpawnPU(e.x,e.y);
+// Popup de puntos: siempre visible cuando picado o premium. El color usa
+// e.color, que para premium ya es dorado (#ffdd00) o cian (#00ffff).
+if(e.diveActive||e.isPremium){spawnScorePopup(e.x,e.y-10,pts,e.color);}if(e.type==='split'&&e.maxHp===2){const off=Math.round(clamp(W*.055,12,20));[-off,off].forEach(dx=>{enemies.push({...e,x:e.x+dx,y:e.y,bx:e.bx+dx,by:e.by,hp:1,maxHp:1,alive:true,flickTimer:0,type:'wasp',color:TYPE_COLOR['wasp'],isPremium:false,speed:e.speed*1.3,waveDelay:0,waveAlpha:1,diveActive:false,diveT:0});});}}break;}}
 }
-// Limpiar bullets marcados dead (sin filter — pool: solo alive=false)
-for(let i=0;i<bullets.length;i++){const b=bullets[i];if(b.alive&&b.dead){b.alive=false;b.dead=false;}}
-// Colisión eBullets vs player + limpieza
-for(let i=0;i<eBullets.length;i++){const b=eBullets[i];if(!b.alive)continue;if(Math.hypot(b.x-player.x,b.y-player.y)<18){b.alive=false;playerHit();}else if(b.dead){b.alive=false;b.dead=false;}}
-// Limpiar bullets marcados dead (sin filter — pool: solo alive=false)
-for(let i=0;i<bullets.length;i++){const b=bullets[i];if(b.alive&&b.dead){b.alive=false;b.dead=false;}}
-// Colisión eBullets vs player + limpieza
-for(let i=0;i<eBullets.length;i++){const b=eBullets[i];if(!b.alive)continue;if(Math.hypot(b.x-player.x,b.y-player.y)<18){b.alive=false;playerHit();}else if(b.dead){b.alive=false;b.dead=false;}}
+bullets=bullets.filter(b=>!b.dead);
+for(const b of eBullets){if(Math.hypot(b.x-player.x,b.y-player.y)<18){b.dead=true;playerHit();}}eBullets=eBullets.filter(b=>!b.dead);
 const lvl=LEVELS[levelIdx];if(!lvl.isBoss&&enemies.filter(e=>e.alive).length===0&&state==='playing'){if(waveIdx<waveTotal)spawnWave();else{beep('lvlup');setTimeout(()=>showLevelModal('complete'),420);state='levelmodal';}}}
 
 // ── Render ────────────────────────────────────────────────────────────────────
 function render(){const lvl=LEVELS[Math.min(levelIdx,LEVELS.length-1)];drawBg(state==='title'?{bg:[0,4,18]}:lvl);if(state==='title'){drawTitleScreen();return;}drawHUD();if(state==='playing'||state==='dead'||state==='levelmodal'){for(const e of enemies){if(!e.alive)continue;ctx.save();ctx.globalAlpha=e.waveAlpha;drawEnemyAt(e);ctx.restore();}if(boss)drawBossShip(boss);drawBullets();drawPowerups();for(const f of xplodeFlashes){let hex=f.col.replace('#','');if(hex.length===3)hex=hex[0]+hex[0]+hex[1]+hex[1]+hex[2]+hex[2];const fr=parseInt(hex.slice(0,2),16)||0,fg2=parseInt(hex.slice(2,4),16)||0,fb=parseInt(hex.slice(4,6),16)||0;const rg=ctx.createRadialGradient(f.x,f.y,0,f.x,f.y,f.r);rg.addColorStop(0,'rgba('+fr+','+fg2+','+fb+','+f.alpha+')');rg.addColorStop(1,'rgba(0,0,0,0)');ctx.fillStyle=rg;ctx.beginPath();ctx.arc(f.x,f.y,f.r,0,Math.PI*2);ctx.fill();}drawParticles();drawScorePopups();if(state!=='dead'&&(!invOn||Math.floor(invTimer/5)%2===0))drawPlayer(player.x,player.y,player.shield>0,player.tri>0,player.rapid>0);}if(flashTimer>0){ctx.fillStyle=flashCol;ctx.fillRect(0,0,W,H);}}
 
 // ── Start game ────────────────────────────────────────────────────────────────
-function startGame(){PDE.hide();document.getElementById('ctrl-btns').classList.add('on');document.getElementById('boss-wrap').classList.remove('on');score=0;lives=3;loopCount=0;levelIdx=0;comboCount=0;comboTimer=0;invOn=false;invTimer=0;frame=0;nextBonusIdx=0;levelsCompleted=0;initBg();initPlayer();initLevel(0);state='playing';updateHUD();}
+function startGame(){document.getElementById('ctrl-btns').classList.add('on');document.getElementById('boss-wrap').classList.remove('on');score=0;lives=3;loopCount=0;levelIdx=0;comboCount=0;comboTimer=0;invOn=false;invTimer=0;frame=0;nextBonusIdx=0;levelsCompleted=0;initBg();initPlayer();initLevel(0);state='playing';updateHUD();}
 function clamp(v,mn,mx){return Math.max(mn,Math.min(mx,v));}
 
 // ── Game loop ─────────────────────────────────────────────────────────────────
-let _lastT=null,_lastDt=1;
-// Debug flags opcionales via URL:
-//   ?debug=1 → overlay de FPS/jitter
-//   ?spd=N   → velocidad del desfile (default 2)
-const _URL_PARAMS=new URLSearchParams(location.search);
-const DEBUG=_URL_PARAMS.get('debug')==='1';
-const PARADE_SPD=parseFloat(_URL_PARAMS.get('spd'))||2;
-// Stats para overlay debug
-const _dtHist=new Array(60).fill(16.667);let _dtHi=0;
-// Acumulador de tiempo para cap a 60fps independiente del refresh rate.
-// El juego está diseñado para 60fps (algunas animaciones son frame-based),
-// así que descartamos frames si no han pasado al menos 16ms desde el último
-// procesado. Funciona en cualquier panel (60Hz natural, 90Hz, 120Hz LTPO).
-let _accTime=0;
-
-function loop(ts){
-  requestAnimationFrame(loop);
-  if(_lastT===null){_lastT=ts;return;}
-  const dtMs=ts-_lastT;
-  _lastT=ts;
-  _accTime+=dtMs;
-  // Si no llegamos a 16ms acumulados, descartar este frame.
-  // 16ms ≈ 60fps. En panel 120Hz acumula 2 frames y procesa uno.
-  // En panel 60Hz procesa todos. En 90Hz procesa la mayoría.
-  if(_accTime<16)return;
-  // Cap del acumulador para evitar saltos enormes si la pestaña estuvo
-  // en background (no queremos procesar 5 segundos de lógica de golpe).
-  if(_accTime>50)_accTime=16;
-  const dt=Math.min(_accTime/16.667,3);
-  _accTime=0;
-  _lastDt=dt;
-  if(DEBUG){_dtHist[_dtHi]=dtMs;_dtHi=(_dtHi+1)%60;}
-  update(dt);
-  render();
-  if(DEBUG)drawDebugOverlay();
-}
-function drawDebugOverlay(){
-  // Calcular media y varianza (std dev) del tiempo entre frames
-  let sum=0,max=0,min=1e9;
-  for(const v of _dtHist){sum+=v;if(v>max)max=v;if(v<min)min=v;}
-  const avg=sum/_dtHist.length;
-  let varSum=0;for(const v of _dtHist)varSum+=(v-avg)*(v-avg);
-  const stddev=Math.sqrt(varSum/_dtHist.length);
-  const fps=1000/avg;
-  ctx.save();
-  ctx.fillStyle='rgba(0,0,0,.7)';ctx.fillRect(4,4,180,70);
-  ctx.font="10px 'Press Start 2P',monospace";ctx.fillStyle='#0f0';ctx.textAlign='left';ctx.textBaseline='top';
-  ctx.fillText('FPS '+fps.toFixed(1),10,10);
-  ctx.fillText('dt  '+avg.toFixed(1)+'ms',10,26);
-  ctx.fillText('jit '+stddev.toFixed(2),10,42);
-  ctx.fillStyle=max-min>8?'#f33':'#0f0';
-  ctx.fillText('max '+(max-min).toFixed(1),10,58);
-  ctx.restore();
-}
+let _lastT=null;
+function loop(ts){requestAnimationFrame(loop);if(_lastT===null){_lastT=ts;return;}const dtMs=ts-_lastT;_lastT=ts;const dt=Math.min(dtMs/16.667,3);update(dt);render();}
 function handleTitleTap(e){if(state!=='title')return;if(e.target.id==='m-btn'||e.target.classList.contains('m-btn'))return;startGame();}
 C.addEventListener('click',handleTitleTap);
 C.addEventListener('touchend',handleTitleTap,{passive:true});
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 score=0;lives=3;loopCount=0;levelIdx=0;frame=0;
-initBg();initPlayer();
-// NO reasignamos bullets/eBullets/particles/scorePopups: son pools pre-alocados.
-// powerups/enemies son arrays normales, esos sí se vacían.
-enemies=[];powerups=[];
-mX=W/2;mY=H-80;initParade();PDE.init();PDE.show();
+initBg();initPlayer();bullets=[];eBullets=[];enemies=[];particles=[];scorePopups=[];powerups=[];
+mX=W/2;mY=H-80;initParade();
 document.fonts.ready.then(()=>showLevelModal('title')).catch(()=>showLevelModal('title'));
 requestAnimationFrame(loop);
 </script>
